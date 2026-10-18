@@ -1,15 +1,22 @@
 # JBR Electrical mobile catalog manager
 
-This React + TypeScript Capacitor app edits products in the **same database used by** `https://jbr-electrical.vercel.app`. It connects to the website's existing API at `https://jbrelec.onrender.com`; it does not create a second Neon catalog. The API URL is preconfigured in `.env.production.local` for APK builds. Neon/database credentials remain private on the backend.
+This React + TypeScript Capacitor app manages products through the same API/database used by `https://jbr-electrical.vercel.app`; it does not create a second catalog. The API URL is preconfigured in the ignored `.env.production.local` file and is embedded in APK builds. Database credentials and SMS provider credentials belong only in the private API environment.
 
-## Connect the APK to the live store
+## Production API and OTP setup
 
-The website's existing Render API at `https://jbrelec.onrender.com` serves the same product database as the storefront. Its mobile catalog endpoints, `/api/auth/me`, and CORS access for the Vercel website and Android Capacitor origins have been deployed.
+The API source in `server/index.ts` implements the production OTP endpoints. The live API must be updated with this server code before an APK using OTP sign-in can authenticate. Deploy it to the **same API/database used by the website** so app edits appear on the main website.
 
-1. This app's ignored `.env.production.local` contains the public API base URL `https://jbrelec.onrender.com`. It is built into the APK, so a new installation won't ask recipients to configure the database/API. If the API address changes, update this file and rebuild.
-2. Build the APK with `npm run android:apk`. Install it and sign in with an existing JBR account whose role is `ADMIN`. The app creates, updates, publishes, and deletes products through the existing API; the website reads the same database.
+Configure these private server environment variables:
 
-An admin password is still required at sign-in; account credentials must not be embedded in an APK shared with others.
+- `DATABASE_URL`: the existing shared PostgreSQL connection string.
+- `JWT_SECRET`: a randomly generated secret of at least 32 characters.
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID`: Twilio Verify credentials.
+
+Apply the `admin_sessions` table from `schema.sql` to the shared database before deploying. Only +91 8209305040 can request and verify OTPs; this allowlist is enforced by the API in `server/index.ts`. Keep OTP sending behind this API; never put Twilio credentials in the APK. OTP requests are rate-limited.
+
+The app stores its refresh session on the device so sign-in survives app restarts. Short-lived API tokens renew automatically; signing out revokes the server-side refresh session. The production-configured APK does not offer demo sign-in.
+
+The APK calls the public API URL from `.env.production.local`; changing that URL requires rebuilding. Product edits are written to the API's database, which must be the same database the website reads.
 
 ## Configure Cloudinary image uploads
 
@@ -18,7 +25,7 @@ The backend currently stores existing product images in its `images` array; the 
 1. This project's ignored `.env.production.local` is configured with the public Cloudinary cloud name and unsigned upload preset. If either value changes, update `VITE_CLOUDINARY_CLOUD_NAME` or `VITE_CLOUDINARY_UPLOAD_PRESET` there and rebuild with `npm run android:apk`. The values are embedded into that APK so recipients don't need to configure Cloudinary. Alternatively, enter them once in **Settings > Cloudinary image storage** on a device.
 2. In a product editor, use **Take photo** or **Choose image**. Uploads go directly to Cloudinary; only the returned HTTPS image URL is sent to the authenticated JBR API and stored in the existing product record.
 
-Unsigned presets are public, so restrict them in Cloudinary. Never put a Cloudinary API secret, Neon connection string, administrator password, or JWT signing secret in the app config or APK. Images are limited to JPEG, PNG, WebP, or AVIF up to 8 MB.
+Unsigned presets are public, so restrict them in Cloudinary. Never put a Cloudinary API secret, Neon connection string, Twilio credential, or JWT signing secret in the app config or APK. Images are limited to JPEG, PNG, WebP, or AVIF up to 8 MB.
 
 ## Development and validation
 
@@ -31,7 +38,7 @@ npm run build
 npm run test:api
 ```
 
-Run `npm run dev:api` only when intentionally testing this project's optional standalone Neon API; it is **not** the API used by the live JBR website or the shared production APK.
+Run `npm run dev:api` only when intentionally testing this project's API. Do not point production builds at it unless it has been deployed with the shared website database and private Twilio Verify configuration.
 
 ## Android build
 

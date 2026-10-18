@@ -1,5 +1,5 @@
 import "dotenv/config";
-import bcrypt from "bcryptjs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import cors from "cors";
 import express from "express";
 import type { ErrorRequestHandler, NextFunction, Request, Response } from "express";
@@ -12,7 +12,13 @@ import { z } from "zod";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-type AdminIdentity = { id: string; email: string };
+type AdminIdentity = { id: string; phone: string; role: "ADMIN" };
+type TwilioVerifyConfig = { accountSid: string; authToken: string; serviceSid: string };
+type AuthOptions = {
+  allowedPhones?: string[];
+  sendOtp?: (phone: string) => Promise<void>;
+  verifyOtp?: (phone: string, code: string) => Promise<boolean>;
+};
 type ProductRecord = QueryResultRow & {
   id: string;
   name: string;
@@ -35,9 +41,14 @@ declare global {
   }
 }
 
-const credentialsSchema = z.object({
-  email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
-  password: z.string().min(12).max(200),
+const phoneSchema = z.object({
+  phone: z.string().trim().regex(/^(?:\+91)?[6-9]\d{9}$/, "Enter a valid Indian mobile number."),
+}).strict();
+const otpSchema = phoneSchema.extend({
+  code: z.string().trim().regex(/^\d{4,10}$/, "Enter the OTP sent to your mobile number."),
+}).strict();
+const refreshSchema = z.object({
+  refresh_token: z.string().min(40).max(200),
 }).strict();
 
 const productSchema = z.object({
@@ -73,19 +84,63 @@ const allowedOrigins = new Set([
   ...defaultOrigins,
   ...(process.env.CORS_ORIGINS ?? "").split(",").map((origin) => origin.trim()).filter(Boolean),
 ]);
-const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
-const adminPassword = process.env.ADMIN_PASSWORD;
 const jwtSecret = process.env.JWT_SECRET;
 const databaseUrl = process.env.DATABASE_URL;
 const isProduction = process.env.NODE_ENV === "production";
+const configuredAllowedPhones = ["+918209305040"];
 
 function assertConfiguration(): void {
   if (!databaseUrl) throw new Error("DATABASE_URL is required. Add your Neon connection string to the private server environment.");
-  if (!adminEmail || !z.string().email().safeParse(adminEmail).success) throw new Error("ADMIN_EMAIL must be a valid address for the initial administrator.");
-  if (!adminPassword || adminPassword.length < 12 || adminPassword.length > 200) {
-    throw new Error("ADMIN_PASSWORD must contain 12 to 200 characters for the initial administrator.");
-  }
   if (!jwtSecret || jwtSecret.length < 32) throw new Error("JWT_SECRET must contain at least 32 randomly generated characters.");
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_VERIFY_SERVICE_SID) {
+    throw new Error("TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID are required for SMS OTP sign-in.");
+  }
+}
+
+function normalizePhone(phone: string): string {
+  const digits = phone.replace(/^\+91/, "");
+  return `+91${digits}`;
+}
+
+function hashRefreshToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function createAccessToken(secret: string, phone: string): string {
+  return jwt.sign({ phone, role: "ADMIN" }, secret, {
+    algorithm: "HS256",
+    subject: phone,
+    expiresIn: "15m",
+    issuer: "jbr-electrical-api",
+    audience: "jbr-electrical-admin",
+  });
+}
+
+function createTwilioVerify(config: TwilioVerifyConfig) {
+  const endpoint = `https://verify.twilio.com/v2/Services/${encodeURIComponent(config.serviceSid)}`;
+  const authorization = `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString("base64")}`;
+  const request = async (pathSuffix: string, values: URLSearchParams) => {
+    const response = await fetch(`${endpoint}/${pathSuffix}`, {
+      method: "POST",
+      headers: {
+        Authorization: authorization,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: values,
+    });
+    const result = await response.json() as { status?: string; message?: string };
+    if (!response.ok) throw new Error(result.message ?? "Twilio Verify request failed.");
+    return result;
+  };
+  return {
+    async sendOtp(phone: string) {
+      await request("Verifications", new URLSearchParams({ To: phone, Channel: "sms" }));
+    },
+    async verifyOtp(phone: string, code: string) {
+      const result = await request("VerificationCheck", new URLSearchParams({ To: phone, Code: code }));
+      return result.status === "approved";
+    },
+  };
 }
 
 function productFromRow(row: ProductRecord) {
@@ -126,11 +181,11 @@ function authenticate(secret: string) {
       issuer: "jbr-electrical-api",
       audience: "jbr-electrical-admin",
     });
-    if (typeof claims === "string" || !claims.sub || typeof claims.email !== "string") {
+    if (typeof claims === "string" || !claims.sub || typeof claims.phone !== "string" || claims.role !== "ADMIN") {
       publicError(res, 401, "Your admin session is invalid. Please sign in again.");
       return;
     }
-    req.admin = { id: claims.sub, email: claims.email };
+    req.admin = { id: claims.sub, phone: claims.phone, role: "ADMIN" };
     next();
   } catch {
     publicError(res, 401, "Your admin session has expired. Please sign in again.");
@@ -151,7 +206,15 @@ function invalidId(req: Request, res: Response): boolean {
   return true;
 }
 
-export function createApplication(pool: Pool, secret: string) {
+export function createApplication(pool: Pool, secret: string, options: AuthOptions = {}) {
+  const allowedPhones = new Set(options.allowedPhones ?? configuredAllowedPhones);
+  const twilio = options.sendOtp && options.verifyOtp
+    ? { sendOtp: options.sendOtp, verifyOtp: options.verifyOtp }
+    : createTwilioVerify({
+      accountSid: process.env.TWILIO_ACCOUNT_SID ?? "",
+      authToken: process.env.TWILIO_AUTH_TOKEN ?? "",
+      serviceSid: process.env.TWILIO_VERIFY_SERVICE_SID ?? "",
+    });
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", isProduction ? 1 : false);
@@ -193,35 +256,114 @@ export function createApplication(pool: Pool, secret: string) {
     res.json({ status: "ok", database: "connected" });
   }));
 
-  app.post("/api/auth/login", rateLimit({
+  app.post("/api/auth/otp/start", rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }), asyncRoute(async (req, res) => {
+    const input = phoneSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "Enter a valid Indian mobile number.");
+      return;
+    }
+    const phone = normalizePhone(input.data.phone);
+    if (!allowedPhones.has(phone)) {
+      publicError(res, 403, "This mobile number is not authorized for JBR admin access.");
+      return;
+    }
+    try {
+      await twilio.sendOtp(phone);
+    } catch {
+      console.error("Could not send the JBR admin sign-in OTP through Twilio Verify.");
+      publicError(res, 502, "Could not send an OTP right now. Please try again later.");
+      return;
+    }
+    res.json({ status: "pending" });
+  }));
+
+  app.post("/api/auth/otp/verify", rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
     standardHeaders: "draft-8",
     legacyHeaders: false,
-    message: { error: "Too many sign-in attempts. Please wait 15 minutes and try again." },
   }), asyncRoute(async (req, res) => {
-    const input = credentialsSchema.safeParse(req.body);
+    const input = otpSchema.safeParse(req.body);
     if (!input.success) {
-      publicError(res, 400, "Enter a valid admin email address and password.");
+      publicError(res, 400, "Enter a valid mobile number and OTP.");
       return;
     }
-    const result = await pool.query<Pick<ProductRecord, "id"> & { email: string; password_hash: string }>(
-      "select id, email, password_hash from admin_users where email = $1",
-      [input.data.email],
+    const phone = normalizePhone(input.data.phone);
+    if (!allowedPhones.has(phone)) {
+      publicError(res, 403, "This mobile number is not authorized for JBR admin access.");
+      return;
+    }
+    let approved: boolean;
+    try {
+      approved = await twilio.verifyOtp(phone, input.data.code);
+    } catch {
+      console.error("Could not verify the JBR admin sign-in OTP through Twilio Verify.");
+      publicError(res, 502, "Could not verify the OTP right now. Please try again later.");
+      return;
+    }
+    if (!approved) {
+      publicError(res, 401, "The OTP is incorrect or has expired.");
+      return;
+    }
+    const refreshToken = randomBytes(48).toString("base64url");
+    await pool.query(
+      "insert into admin_sessions (id, phone, refresh_token_hash) values ($1, $2, $3)",
+      [randomUUID(), phone, hashRefreshToken(refreshToken)],
     );
-    const admin = result.rows[0];
-    if (!admin || !(await bcrypt.compare(input.data.password, admin.password_hash))) {
-      publicError(res, 401, "The email address or password is incorrect.");
+    res.json({
+      access_token: createAccessToken(secret, phone),
+      refresh_token: refreshToken,
+      user: { id: phone, phone, role: "ADMIN" },
+    });
+  }));
+
+  app.post("/api/auth/refresh", rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 60,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }), asyncRoute(async (req, res) => {
+    const input = refreshSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "Your sign-in session is invalid. Please sign in again.");
       return;
     }
-    const accessToken = jwt.sign({ email: admin.email }, secret, {
-      algorithm: "HS256",
-      subject: admin.id,
-      expiresIn: "8h",
-      issuer: "jbr-electrical-api",
-      audience: "jbr-electrical-admin",
+    const nextRefreshToken = randomBytes(48).toString("base64url");
+    const result = await pool.query<{ phone: string }>(
+      `update admin_sessions
+       set refresh_token_hash = $2
+       where refresh_token_hash = $1 and revoked_at is null
+       returning phone`,
+      [hashRefreshToken(input.data.refresh_token), hashRefreshToken(nextRefreshToken)],
+    );
+    const phone = result.rows[0]?.phone;
+    if (!phone || !allowedPhones.has(phone)) {
+      publicError(res, 401, "Your sign-in session is invalid. Please sign in again.");
+      return;
+    }
+    res.json({
+      access_token: createAccessToken(secret, phone),
+      refresh_token: nextRefreshToken,
+      user: { id: phone, phone, role: "ADMIN" },
     });
-    res.json({ access_token: accessToken, user: { id: admin.id, email: admin.email } });
+  }));
+
+  app.post("/api/auth/logout", asyncRoute(async (req, res) => {
+    const input = refreshSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "The sign-in session could not be ended.");
+      return;
+    }
+    await pool.query(
+      "update admin_sessions set revoked_at = now() where refresh_token_hash = $1 and revoked_at is null",
+      [hashRefreshToken(input.data.refresh_token)],
+    );
+    res.status(204).end();
   }));
 
   app.get("/api/auth/me", authenticate(secret), (req, res) => {
@@ -339,11 +481,6 @@ async function start(): Promise<void> {
 
   try {
     await pool.query("select 1");
-    const passwordHash = await bcrypt.hash(adminPassword!, 12);
-    await pool.query(
-      "insert into admin_users (email, password_hash) values ($1, $2) on conflict (email) do nothing",
-      [adminEmail, passwordHash],
-    );
     const app = createApplication(pool, jwtSecret!);
     const port = Number(process.env.PORT ?? 3000);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be a valid TCP port number.");

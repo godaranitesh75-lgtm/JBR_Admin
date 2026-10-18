@@ -26,7 +26,7 @@ type AppSettings = {
 type AuthSession = {
   access_token: string;
   refresh_token?: string;
-  user: { id: string; email?: string; role?: string };
+  user: { id: string; phone?: string; role?: string };
 };
 type ToastMessage = { id: number; message: string; error: boolean };
 type IconName =
@@ -84,7 +84,7 @@ function Icon({ name, className }: { name: IconName; className?: string }) {
 
 function readSession(): AuthSession | null {
   try {
-    const saved = sessionStorage.getItem(STORAGE_KEYS.session);
+    const saved = localStorage.getItem(STORAGE_KEYS.session);
     return saved ? JSON.parse(saved) as AuthSession : null;
   } catch (error) {
     console.error("Could not read the saved admin session.", error);
@@ -137,7 +137,7 @@ function safeSettings(): AppSettings {
   };
   if (saved.supabaseKey || saved.supabaseUrl) {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(migrated));
-    sessionStorage.removeItem(STORAGE_KEYS.session);
+    localStorage.removeItem(STORAGE_KEYS.session);
   }
   return migrated;
 }
@@ -188,6 +188,19 @@ async function readResponse<T>(response: Response): Promise<T> {
   return parsed as T;
 }
 
+async function renewSession(config: AppSettings, refreshToken: string): Promise<AuthSession> {
+  const response = await fetch(`${apiBase(config)}/api/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const renewed = await readResponse<AuthSession>(response);
+  if (!renewed.access_token || !renewed.refresh_token || !renewed.user?.id) {
+    throw new Error("The server did not return a valid renewed session.");
+  }
+  return renewed;
+}
+
 function ProductPhoto({ product, className = "" }: { product: Pick<Product, "name" | "image_url">; className?: string }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [product.image_url]);
@@ -213,8 +226,9 @@ function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(settings);
   const [loginError, setLoginError] = useState("");
-  const [loginEmail, setLoginEmail] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
+  const [loginPhone, setLoginPhone] = useState("");
+  const [loginCode, setLoginCode] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
 
   const notify = useCallback((message: string, error = false) => {
     const id = Date.now() + Math.random();
@@ -223,6 +237,32 @@ function App() {
   }, []);
 
   const remoteConfigured = Boolean(settings.apiUrl);
+
+  const authenticatedFetch = useCallback(async (auth: AuthSession, url: string, init: RequestInit = {}) => {
+    const send = (token: string) => {
+      const headers = new Headers(init.headers);
+      headers.set("Authorization", `Bearer ${token}`);
+      return fetch(url, { ...init, headers });
+    };
+    let activeSession = auth;
+    let response = await send(activeSession.access_token);
+    if (response.status === 401 && activeSession.refresh_token) {
+      try {
+        activeSession = await renewSession(settings, activeSession.refresh_token);
+      } catch (error) {
+        localStorage.removeItem(STORAGE_KEYS.session);
+        setSession(null);
+        setRemoteAdmin(false);
+        setLoginRequired(true);
+        setLoginError(error instanceof Error ? error.message : "Your sign-in session expired. Request a new OTP.");
+        throw error;
+      }
+      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(activeSession));
+      setSession(activeSession);
+      response = await send(activeSession.access_token);
+    }
+    return response;
+  }, [settings]);
 
   useEffect(() => {
     const configured = Boolean(settings.apiUrl);
@@ -244,8 +284,11 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const verifyAdministrator = useCallback(async (config: AppSettings, auth: AuthSession) => {
+  const verifyAdministrator = useCallback(async (config: AppSettings, savedAuth: AuthSession) => {
     try {
+      if (!savedAuth.refresh_token) throw new Error("This saved sign-in needs to be renewed. Please request an OTP.");
+      const auth = await renewSession(config, savedAuth.refresh_token);
+      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(auth));
       const identity = await readResponse<{ user: AuthSession["user"] }>(await fetch(`${apiBase(config)}/api/auth/me`, {
         headers: { Authorization: `Bearer ${auth.access_token}` },
       }));
@@ -258,9 +301,9 @@ function App() {
       setRemoteAdmin(true);
       setLoginRequired(false);
       setProducts(catalog);
-      sessionStorage.setItem(STORAGE_KEYS.session, JSON.stringify(auth));
+      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(auth));
     } catch (error) {
-      sessionStorage.removeItem(STORAGE_KEYS.session);
+      localStorage.removeItem(STORAGE_KEYS.session);
       setSession(null);
       setRemoteAdmin(false);
       setLoginRequired(true);
@@ -326,7 +369,7 @@ function App() {
       active: product.active,
     };
     const isExisting = products.some((item) => item.id === product.id);
-    const response = await fetch(`${apiBase(settings)}/api/admin/products${isExisting ? `/${encodeURIComponent(id)}` : ""}`, {
+    const response = await authenticatedFetch(session, `${apiBase(settings)}/api/admin/products${isExisting ? `/${encodeURIComponent(id)}` : ""}`, {
       method: isExisting ? "PATCH" : "POST",
       headers: {
         Authorization: `Bearer ${session.access_token}`,
@@ -340,7 +383,7 @@ function App() {
       const exists = current.some((item) => item.id === saved.id);
       return exists ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current];
     });
-  }, [mode, products, saveDemoProducts, session, remoteAdmin, settings]);
+  }, [mode, products, saveDemoProducts, session, remoteAdmin, settings, authenticatedFetch]);
 
   const deleteProduct = async (product: Product) => {
     if (!window.confirm(`Delete "${product.name}" from the catalog? This cannot be undone.`)) return;
@@ -349,7 +392,7 @@ function App() {
         saveDemoProducts(products.filter((item) => item.id !== product.id));
       } else {
         if (!session || !remoteAdmin) throw new Error("Sign in with an approved store administrator account to edit products.");
-        const response = await fetch(`${apiBase(settings)}/api/admin/products/${encodeURIComponent(product.id)}`, {
+        const response = await authenticatedFetch(session, `${apiBase(settings)}/api/admin/products/${encodeURIComponent(product.id)}`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${session.access_token}` },
         });
@@ -388,7 +431,7 @@ function App() {
         await readResponse<{ status: string }>(response);
       }
       localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(next));
-      sessionStorage.removeItem(STORAGE_KEYS.session);
+      localStorage.removeItem(STORAGE_KEYS.session);
       setSettings(next);
       setSettingsDraft(next);
       setSession(null);
@@ -397,7 +440,7 @@ function App() {
         setMode("remote");
         setLoginRequired(true);
         setLoginError("");
-        notify("JBR store API connected. Sign in with your existing administrator account.");
+        notify("JBR store API connected. Sign in with an approved mobile number using SMS OTP.");
       } else {
         setMode("demo");
         setLoginRequired(false);
@@ -429,7 +472,7 @@ function App() {
     const next = { ...settings, apiUrl: "" };
     try {
       localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(next));
-      sessionStorage.removeItem(STORAGE_KEYS.session);
+      localStorage.removeItem(STORAGE_KEYS.session);
       setSettings(next);
       setSettingsDraft(next);
       setSession(null);
@@ -442,34 +485,53 @@ function App() {
     }
   };
 
-  const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
+  const requestOtp = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoginError("");
     setLoading(true);
     try {
-      const response = await fetch(`${apiBase(settings)}/api/auth/login`, {
+      const response = await fetch(`${apiBase(settings)}/api/auth/otp/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: loginEmail.trim(), password: loginPassword }),
+        body: JSON.stringify({ phone: loginPhone.trim() }),
       });
-      const loginResult = await readResponse<{ token: string; user: AuthSession["user"] }>(response);
-      if (!loginResult.token || !loginResult.user?.id) throw new Error("Sign-in did not return a valid session. Check your email and password.");
-      if (loginResult.user.role !== "ADMIN") throw new Error("This account does not have JBR Electrical administrator access.");
-      const authResult: AuthSession = { access_token: loginResult.token, user: loginResult.user };
+      await readResponse<{ status: string }>(response);
+      setOtpSent(true);
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "Could not send an OTP. Check your connection and try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const verifyOtp = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoginError("");
+    setLoading(true);
+    try {
+      const response = await fetch(`${apiBase(settings)}/api/auth/otp/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: loginPhone.trim(), code: loginCode.trim() }),
+      });
+      const loginResult = await readResponse<AuthSession>(response);
+      if (!loginResult.access_token || !loginResult.refresh_token || !loginResult.user?.id) throw new Error("The server did not return a valid sign-in session.");
+      if (loginResult.user.role !== "ADMIN") throw new Error("This mobile number does not have JBR Electrical administrator access.");
+      const authResult: AuthSession = loginResult;
       const catalogResponse = await fetch(`${apiBase(settings)}/api/admin/products`, {
         headers: { Authorization: `Bearer ${authResult.access_token}` },
       });
       const remoteProducts = await readResponse<Product[]>(catalogResponse);
-      sessionStorage.setItem(STORAGE_KEYS.session, JSON.stringify(authResult));
+      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(authResult));
       setProducts(remoteProducts);
       setSession(authResult);
       setRemoteAdmin(true);
       setMode("remote");
       setLoginRequired(false);
-      setLoginPassword("");
+      setLoginCode("");
       notify("Welcome to your JBR Electrical admin workspace.");
     } catch (error) {
-      setLoginError(error instanceof Error ? error.message : "Could not sign in. Check your connection and try again.");
+      setLoginError(error instanceof Error ? error.message : "Could not verify the OTP. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
@@ -484,13 +546,26 @@ function App() {
     notify("You’re exploring the demo catalog. Connect the JBR store API to manage the live catalog.");
   };
 
-  const signOut = () => {
-    sessionStorage.removeItem(STORAGE_KEYS.session);
+  const signOut = async () => {
+    const auth = session;
+    localStorage.removeItem(STORAGE_KEYS.session);
     setSession(null);
     setRemoteAdmin(false);
     setLoginRequired(remoteConfigured);
     setLoginError("");
     if (!remoteConfigured) setMode("demo");
+    if (auth?.refresh_token) {
+      try {
+        const response = await fetch(`${apiBase(settings)}/api/auth/logout`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: auth.refresh_token }),
+        });
+        if (!response.ok) await readResponse<unknown>(response);
+      } catch (error) {
+        notify(`Signed out on this device, but server session revocation failed: ${error instanceof Error ? error.message : "network error."}`, true);
+      }
+    }
   };
 
   const uploadProductImage = async (file: File, imageSetter: (url: string) => void) => {
@@ -621,7 +696,7 @@ function App() {
         <nav className="main-nav"><NavButton name="settings" current={view} icon="settings" label="Settings & setup" onSelect={changeView} /></nav>
         <div className="sidebar-bottom">
           <div className="help-card"><div className="help-icon"><Icon name="spark" /></div><strong>Your shop, in sync.</strong><p>Manage your catalog and keep your website up to date.</p><button className="text-button" onClick={() => changeView("settings")}>View setup guide <span aria-hidden="true">→</span></button></div>
-          <div className="user-row"><span className="user-avatar">J</span><span className="user-copy"><strong>JBR Electrical</strong><small>{mode === "demo" ? "Demo workspace" : session?.user.email ?? "Live database"}</small></span>{session && <button className="icon-button sign-out-button" onClick={signOut} aria-label="Sign out" title="Sign out"><Icon name="logout" /></button>}</div>
+          <div className="user-row"><span className="user-avatar">J</span><span className="user-copy"><strong>JBR Electrical</strong><small>{mode === "demo" ? "Demo workspace" : session?.user.phone ?? "Live database"}</small></span>{session && <button className="icon-button sign-out-button" onClick={signOut} aria-label="Sign out" title="Sign out"><Icon name="logout" /></button>}</div>
         </div>
       </aside>
 
@@ -660,8 +735,10 @@ function App() {
         onTakePhoto={takeProductPhoto} notify={notify}
       />}
       {loginRequired && <LoginDialog
-        onSubmit={handleLogin} loading={loading} error={loginError}
-        email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} onDemo={useDemoMode}
+        onRequestOtp={requestOtp} onVerifyOtp={verifyOtp} loading={loading} error={loginError}
+        phone={loginPhone} setPhone={setLoginPhone} code={loginCode} setCode={setLoginCode} onDemo={useDemoMode}
+        otpSent={otpSent} allowDemo={!BUILD_SETTINGS.apiUrl}
+        onChangeNumber={() => { setOtpSent(false); setLoginCode(""); setLoginError(""); }}
         onClose={() => { setLoginRequired(false); setMode("demo"); }}
       />}
       {loading && <div className="busy-indicator" role="status" aria-live="polite"><span className="spinner" /> Working…</div>}
@@ -901,7 +978,7 @@ function SettingsView({ settings, setSettings, databaseConnected, saveDatabase, 
       </section>
       <section className="panel setup-guide">
         <div className="guide-heading"><span className="settings-large-icon guide-icon"><Icon name="book" /></span><div><h2>Getting your store online</h2><p>Three quick steps to connect the catalog to your website.</p></div><a href="./README.md" className="guide-link" target="_blank" rel="noreferrer">Full setup guide <span aria-hidden="true">↗</span></a></div>
-        <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the existing backend</strong><p>Deploy the backend changes so the existing API allows the website and Android app and exposes protected product management routes.</p></div></div><div className="guide-step"><span>02</span><div><strong>Use your store admin sign-in</strong><p>Sign in with an existing JBR account whose role is <code>ADMIN</code>. No separate database account is needed on the phone.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here, or bake them into a shared APK build.</p></div></div></div>
+        <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the existing backend</strong><p>Deploy this API's OTP endpoints, CORS settings, and protected product routes to the API shared with the website.</p></div></div><div className="guide-step"><span>02</span><div><strong>Sign in with an approved mobile</strong><p>Request an SMS OTP from one of the three approved JBR mobile numbers. The app keeps the session on this device until sign-out or token expiry.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here, or bake them into a shared APK build to enable new image uploads.</p></div></div></div>
         <div className="guide-footer"><Icon name="lock" /> Database credentials and signing secrets stay on the backend, never in the APK.</div>
       </section>
       <section className="panel data-tools-card"><div><h2>Catalog backup</h2><p>Export or restore your product data as a JSON file.</p></div><div className="data-tools-actions"><button className="button button-secondary" onClick={exportJson}><Icon name="download" /> Export backup</button><label className="button button-secondary import-button"><Icon name="upload" /> Import backup<input type="file" accept="application/json,.json" hidden onChange={importCatalog} /></label></div></section>
@@ -1030,28 +1107,35 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
   </div>;
 }
 
-function LoginDialog({ onSubmit, loading, error, email, setEmail, password, setPassword, onDemo, onClose }: {
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+function LoginDialog({ onRequestOtp, onVerifyOtp, loading, error, phone, setPhone, code, setCode, onDemo, onClose, otpSent, allowDemo, onChangeNumber }: {
+  onRequestOtp: (event: FormEvent<HTMLFormElement>) => void;
+  onVerifyOtp: (event: FormEvent<HTMLFormElement>) => void;
   loading: boolean;
   error: string;
-  email: string;
-  setEmail: (email: string) => void;
-  password: string;
-  setPassword: (password: string) => void;
+  phone: string;
+  setPhone: (phone: string) => void;
+  code: string;
+  setCode: (code: string) => void;
   onDemo: () => void;
   onClose: () => void;
+  otpSent: boolean;
+  allowDemo: boolean;
+  onChangeNumber: () => void;
 }) {
   return <div className="modal-backdrop login-backdrop"><section className="login-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title">
     <a className="brand login-brand" href="#" onClick={(event) => event.preventDefault()}><BrandMark /><span className="brand-copy"><strong>JBR <span>Electrical</span></strong><small>STORE MANAGEMENT</small></span></a>
     <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">POWERING YOUR CATALOG</span></div>
-    <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">Welcome back<span className="heading-period">.</span></h1><p>Sign in with the administrator account provisioned by your store owner.</p>
-      <form onSubmit={onSubmit}><label className="field-label" htmlFor="login-email">Email address</label><input className="text-input" id="login-email" type="email" autoComplete="username" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} required /><label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete="current-password" minLength={8} placeholder="Your administrator password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+    <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">Welcome back<span className="heading-period">.</span></h1><p>{otpSent ? `Enter the verification code sent to ${phone}.` : "Sign in with an approved mobile number. We’ll send a one-time verification code by SMS."}</p>
+      <form onSubmit={otpSent ? onVerifyOtp : onRequestOtp}>
+        <label className="field-label" htmlFor="login-phone">Mobile number</label><input className="text-input" id="login-phone" type="tel" inputMode="tel" autoComplete="tel" placeholder="10-digit mobile number" value={phone} onChange={(event) => setPhone(event.target.value)} disabled={otpSent} required />
+        {otpSent && <><label className="field-label" htmlFor="login-code">One-time password</label><input className="text-input" id="login-code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{4,10}" maxLength={10} placeholder="Enter SMS code" value={code} onChange={(event) => setCode(event.target.value)} required /></>}
         {error && <div className="form-error login-error" role="alert">{error}</div>}
-        <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : "Sign in"} <span aria-hidden="true">→</span></button>
+        <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : otpSent ? "Verify & sign in" : "Send OTP"} <span aria-hidden="true">→</span></button>
       </form>
-      <button className="demo-login" onClick={onDemo}>Explore with demo catalog <span aria-hidden="true">→</span></button>
-      <p className="login-security"><Icon name="lock" /> Your JBR store admin API protects product changes.</p>
-      <button className="login-back-link" onClick={onClose}>Back to the demo catalog</button>
+      {otpSent && <button className="login-back-link" onClick={onChangeNumber}>Use a different number</button>}
+      {allowDemo && <button className="demo-login" onClick={onDemo}>Explore with demo catalog <span aria-hidden="true">→</span></button>}
+      <p className="login-security"><Icon name="lock" /> Your sign-in stays active on this device until you sign out.</p>
+      {allowDemo && <button className="login-back-link" onClick={onClose}>Back to the demo catalog</button>}
     </div>
   </section></div>;
 }
