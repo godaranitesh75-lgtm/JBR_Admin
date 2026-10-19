@@ -1,5 +1,16 @@
 apply plugin: 'com.android.application'
 
+def releaseSigningProperties = [
+    storeFile: project.findProperty('JBR_RELEASE_STORE_FILE') ?: System.getenv('JBR_RELEASE_STORE_FILE'),
+    storePassword: project.findProperty('JBR_RELEASE_STORE_PASSWORD') ?: System.getenv('JBR_RELEASE_STORE_PASSWORD'),
+    keyAlias: project.findProperty('JBR_RELEASE_KEY_ALIAS') ?: System.getenv('JBR_RELEASE_KEY_ALIAS'),
+    keyPassword: project.findProperty('JBR_RELEASE_KEY_PASSWORD') ?: System.getenv('JBR_RELEASE_KEY_PASSWORD'),
+]
+def configuredReleaseSigning = releaseSigningProperties.values().every { it }
+if (releaseSigningProperties.values().any { it } && !configuredReleaseSigning) {
+    throw new GradleException('Release signing requires JBR_RELEASE_STORE_FILE, JBR_RELEASE_STORE_PASSWORD, JBR_RELEASE_KEY_ALIAS, and JBR_RELEASE_KEY_PASSWORD.')
+}
+
 android {
     namespace "com.jbrelectrical.admin"
     compileSdk rootProject.ext.compileSdkVersion
@@ -16,8 +27,21 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        if (configuredReleaseSigning) {
+            release {
+                storeFile file(releaseSigningProperties.storeFile)
+                storePassword releaseSigningProperties.storePassword
+                keyAlias releaseSigningProperties.keyAlias
+                keyPassword releaseSigningProperties.keyPassword
+            }
+        }
+    }
     buildTypes {
         release {
+            if (configuredReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

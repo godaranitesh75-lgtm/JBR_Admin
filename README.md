@@ -48,7 +48,25 @@ Install Android Studio and Android SDK Platform 35 / Build-Tools 35. Set `JAVA_H
 npm run android:apk
 ```
 
-The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. For release or Google Play, generate a signed APK/AAB in Android Studio and keep the signing key private.
+The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. To produce a signed release APK, create a private release keystore (the command prompts for its password):
+
+```powershell
+New-Item -ItemType Directory -Path "$env:USERPROFILE\.jbr-admin" -Force
+& "$env:JAVA_HOME\bin\keytool.exe" -genkeypair -v -storetype PKCS12 `
+  -keystore "$env:USERPROFILE\.jbr-admin\release-key.p12" `
+  -alias jbr_release -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Provide these Gradle properties in the user-level `%USERPROFILE%\.gradle\gradle.properties` (or set them as environment variables). Replace `<your-user>` with the Windows profile directory name and use the password you entered when creating the key for both password values:
+
+```properties
+JBR_RELEASE_STORE_FILE=C:/Users/<your-user>/.jbr-admin/release-key.p12
+JBR_RELEASE_STORE_PASSWORD=<private keystore password>
+JBR_RELEASE_KEY_ALIAS=jbr_release
+JBR_RELEASE_KEY_PASSWORD=<same private key password>
+```
+
+Keep the keystore and passwords backed up securely; do not commit them. With signing configured, run `cd android; .\gradlew.bat assembleRelease`. The signed APK is written to `android/app/build/outputs/apk/release/app-release.apk`. The signing key is permanent for app updates; use the same key for every future release.
 
 ## Features
 
