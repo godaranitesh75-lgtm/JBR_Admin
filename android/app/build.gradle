@@ -7,9 +7,6 @@ def releaseSigningProperties = [
     keyPassword: project.findProperty('JBR_RELEASE_KEY_PASSWORD') ?: System.getenv('JBR_RELEASE_KEY_PASSWORD'),
 ]
 def configuredReleaseSigning = releaseSigningProperties.values().every { it }
-if (releaseSigningProperties.values().any { it } && !configuredReleaseSigning) {
-    throw new GradleException('Release signing requires JBR_RELEASE_STORE_FILE, JBR_RELEASE_STORE_PASSWORD, JBR_RELEASE_KEY_ALIAS, and JBR_RELEASE_KEY_PASSWORD.')
-}
 
 android {
     namespace "com.jbrelectrical.admin"
@@ -18,8 +15,8 @@ android {
         applicationId "com.jbrelectrical.admin"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "1.1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -45,6 +42,13 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+    }
+}
+
+gradle.taskGraph.whenReady { taskGraph ->
+    def releaseArtifactTasks = taskGraph.allTasks.findAll { it.name in ['assembleRelease', 'bundleRelease'] }
+    if (releaseArtifactTasks && !configuredReleaseSigning) {
+        throw new GradleException('Release builds must be signed. Configure JBR_RELEASE_STORE_FILE, JBR_RELEASE_STORE_PASSWORD, JBR_RELEASE_KEY_ALIAS, and JBR_RELEASE_KEY_PASSWORD before assembling the release APK.')
     }
 }
 

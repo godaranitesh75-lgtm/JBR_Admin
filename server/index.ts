@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import cors from "cors";
 import express from "express";
 import type { ErrorRequestHandler, NextFunction, Request, Response } from "express";
@@ -16,6 +16,9 @@ type AdminIdentity = { id: string; phone: string; role: "ADMIN" };
 type TwilioVerifyConfig = { accountSid: string; authToken: string; serviceSid: string };
 type AuthOptions = {
   allowedPhones?: string[];
+  allowPublicCatalogWrites?: boolean;
+  adminUsername?: string;
+  adminPassword?: string;
   sendOtp?: (phone: string) => Promise<void>;
   verifyOtp?: (phone: string, code: string) => Promise<boolean>;
 };
@@ -46,6 +49,14 @@ const phoneSchema = z.object({
 }).strict();
 const otpSchema = phoneSchema.extend({
   code: z.string().trim().regex(/^\d{4,10}$/, "Enter the OTP sent to your mobile number."),
+}).strict();
+const passwordLoginSchema = z.object({
+  username: z.string().trim().min(1).max(64),
+  password: z.string().min(1).max(256),
+}).strict();
+const changePasswordSchema = z.object({
+  current_password: z.string().min(1).max(256),
+  new_password: z.string().min(12).max(256),
 }).strict();
 const refreshSchema = z.object({
   refresh_token: z.string().min(40).max(200),
@@ -88,12 +99,20 @@ const jwtSecret = process.env.JWT_SECRET;
 const databaseUrl = process.env.DATABASE_URL;
 const isProduction = process.env.NODE_ENV === "production";
 const configuredAllowedPhones = ["+918209305040"];
+const configuredAdminUsername = process.env.ADMIN_USERNAME;
+const configuredAdminPassword = process.env.ADMIN_PASSWORD;
 
 function assertConfiguration(): void {
   if (!databaseUrl) throw new Error("DATABASE_URL is required. Add your Neon connection string to the private server environment.");
   if (!jwtSecret || jwtSecret.length < 32) throw new Error("JWT_SECRET must contain at least 32 randomly generated characters.");
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_VERIFY_SERVICE_SID) {
-    throw new Error("TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID are required for SMS OTP sign-in.");
+  const hasUsername = Boolean(configuredAdminUsername);
+  const hasPassword = Boolean(configuredAdminPassword);
+  if (hasUsername !== hasPassword) {
+    throw new Error("ADMIN_USERNAME and ADMIN_PASSWORD must both be configured for password sign-in.");
+  }
+  const hasTwilio = Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_VERIFY_SERVICE_SID);
+  if (!hasUsername && !hasTwilio) {
+    throw new Error("Configure ADMIN_USERNAME and ADMIN_PASSWORD, or configure all Twilio Verify variables for sign-in.");
   }
 }
 
@@ -104,6 +123,42 @@ function normalizePhone(phone: string): string {
 
 function hashRefreshToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function credentialsMatch(actual: string, expected: string): boolean {
+  const actualHash = createHash("sha256").update(actual).digest();
+  const expectedHash = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(actualHash, expectedHash);
+}
+
+function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, 64, { N: 16_384, r: 8, p: 1 }, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(`scrypt$${salt.toString("base64url")}$${derivedKey.toString("base64url")}`);
+    });
+  });
+}
+
+function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
+  const [algorithm, saltText, hashText, extra] = encodedHash.split("$");
+  if (algorithm !== "scrypt" || !saltText || !hashText || extra) return Promise.resolve(false);
+  const salt = Buffer.from(saltText, "base64url");
+  const expected = Buffer.from(hashText, "base64url");
+  if (salt.length !== 16 || expected.length !== 64) return Promise.resolve(false);
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, expected.length, { N: 16_384, r: 8, p: 1 }, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(timingSafeEqual(derivedKey, expected));
+    });
+  });
 }
 
 function createAccessToken(secret: string, phone: string): string {
@@ -208,6 +263,21 @@ function invalidId(req: Request, res: Response): boolean {
 
 export function createApplication(pool: Pool, secret: string, options: AuthOptions = {}) {
   const allowedPhones = new Set(options.allowedPhones ?? configuredAllowedPhones);
+  const adminUsername = options.adminUsername ?? configuredAdminUsername;
+  const adminPassword = options.adminPassword ?? configuredAdminPassword;
+  const allowPublicCatalogWrites = options.allowPublicCatalogWrites
+    ?? process.env.ENABLE_PUBLIC_CATALOG_WRITES === "true";
+  const catalogAccess = allowPublicCatalogWrites
+    ? (_req: Request, _res: Response, next: NextFunction) => next()
+    : authenticate(secret);
+  const catalogWriteRateLimit = allowPublicCatalogWrites
+    ? rateLimit({
+      windowMs: 15 * 60 * 1000,
+      limit: 30,
+      standardHeaders: "draft-8",
+      legacyHeaders: false,
+    })
+    : (_req: Request, _res: Response, next: NextFunction) => next();
   const twilio = options.sendOtp && options.verifyOtp
     ? { sendOtp: options.sendOtp, verifyOtp: options.verifyOtp }
     : createTwilioVerify({
@@ -254,6 +324,132 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
   app.get("/api/health", asyncRoute(async (_req, res) => {
     await pool.query("select 1");
     res.json({ status: "ok", database: "connected" });
+  }));
+
+  app.post("/api/auth/login", rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }), asyncRoute(async (req, res) => {
+    const input = passwordLoginSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "Enter a valid username and password.");
+      return;
+    }
+    if (!adminUsername || !adminPassword) {
+      publicError(res, 503, "Username and password sign-in is not configured on this API.");
+      return;
+    }
+    const stored = await pool.query<{ username: string; password_hash: string }>(
+      "select username, password_hash from admin_credentials where id = 1",
+    );
+    let credential = stored.rows[0];
+    let valid = credential
+      ? credentialsMatch(input.data.username, credential.username) && await verifyPassword(input.data.password, credential.password_hash)
+      : credentialsMatch(input.data.username, adminUsername) && credentialsMatch(input.data.password, adminPassword);
+    if (!valid) {
+      publicError(res, 401, "The username or password is incorrect.");
+      return;
+    }
+    if (!credential) {
+      const passwordHash = await hashPassword(input.data.password);
+      const inserted = await pool.query<{ username: string; password_hash: string }>(
+        `insert into admin_credentials (id, username, password_hash)
+         values (1, $1, $2)
+         on conflict (id) do nothing
+         returning username, password_hash`,
+        [adminUsername, passwordHash],
+      );
+      credential = inserted.rows[0];
+      if (!credential) {
+        const latest = await pool.query<{ username: string; password_hash: string }>(
+          "select username, password_hash from admin_credentials where id = 1",
+        );
+        credential = latest.rows[0];
+        valid = Boolean(credential
+          && credentialsMatch(input.data.username, credential.username)
+          && await verifyPassword(input.data.password, credential.password_hash));
+        if (!valid) {
+          publicError(res, 401, "The username or password is incorrect.");
+          return;
+        }
+      }
+    }
+    const phone = [...allowedPhones][0];
+    if (!phone) {
+      publicError(res, 503, "Administrator sign-in is not configured on this API.");
+      return;
+    }
+    const refreshToken = randomBytes(48).toString("base64url");
+    await pool.query(
+      "insert into admin_sessions (id, phone, refresh_token_hash) values ($1, $2, $3)",
+      [randomUUID(), phone, hashRefreshToken(refreshToken)],
+    );
+    res.json({
+      access_token: createAccessToken(secret, phone),
+      refresh_token: refreshToken,
+      user: { id: phone, role: "ADMIN" },
+    });
+  }));
+
+  app.post("/api/auth/password", authenticate(secret), rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }), asyncRoute(async (req, res) => {
+    const input = changePasswordSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "The new password must be at least 12 characters.");
+      return;
+    }
+    const stored = await pool.query<{ username: string; password_hash: string }>(
+      "select username, password_hash from admin_credentials where id = 1",
+    );
+    let credential = stored.rows[0];
+    let currentPasswordValid = credential
+      ? await verifyPassword(input.data.current_password, credential.password_hash)
+      : Boolean(adminUsername && adminPassword
+        && credentialsMatch(input.data.current_password, adminPassword));
+    if (!currentPasswordValid) {
+      publicError(res, 401, "The current password is incorrect.");
+      return;
+    }
+    if (!credential) {
+      const passwordHash = await hashPassword(input.data.current_password);
+      const inserted = await pool.query<{ username: string; password_hash: string }>(
+        `insert into admin_credentials (id, username, password_hash)
+         values (1, $1, $2)
+         on conflict (id) do nothing
+         returning username, password_hash`,
+        [adminUsername, passwordHash],
+      );
+      credential = inserted.rows[0];
+      if (!credential) {
+        const latest = await pool.query<{ username: string; password_hash: string }>(
+          "select username, password_hash from admin_credentials where id = 1",
+        );
+        credential = latest.rows[0];
+        currentPasswordValid = Boolean(credential
+          && await verifyPassword(input.data.current_password, credential.password_hash));
+        if (!currentPasswordValid) {
+          publicError(res, 401, "The current password is incorrect.");
+          return;
+        }
+      }
+    }
+    const nextHash = await hashPassword(input.data.new_password);
+    const updated = await pool.query(
+      "update admin_credentials set password_hash = $1, updated_at = now() where id = 1 and password_hash = $2 returning id",
+      [nextHash, credential?.password_hash],
+    );
+    if (!updated.rowCount) {
+      publicError(res, 409, "The password changed in another session. Sign in again and retry.");
+      return;
+    }
+    await pool.query("update admin_sessions set revoked_at = now() where revoked_at is null");
+    res.status(204).end();
   }));
 
   app.post("/api/auth/otp/start", rateLimit({
@@ -377,14 +573,14 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json(result.rows.map(productFromRow));
   }));
 
-  app.get("/api/admin/products", authenticate(secret), asyncRoute(async (_req, res) => {
+  app.get("/api/admin/products", catalogAccess, asyncRoute(async (_req, res) => {
     const result = await pool.query<ProductRecord>(
       "select id, name, sku, category, description, price, stock, image_url, active, created_at, updated_at from products order by updated_at desc",
     );
     res.json(result.rows.map(productFromRow));
   }));
 
-  app.post("/api/admin/products", authenticate(secret), asyncRoute(async (req, res) => {
+  app.post("/api/admin/products", catalogAccess, catalogWriteRateLimit, asyncRoute(async (req, res) => {
     const input = productSchema.safeParse(req.body);
     if (!input.success) {
       publicError(res, 400, validationMessage(input.error));
@@ -400,7 +596,7 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.status(201).json(productFromRow(result.rows[0]));
   }));
 
-  app.patch("/api/admin/products/:id", authenticate(secret), asyncRoute(async (req, res) => {
+  app.patch("/api/admin/products/:id", catalogAccess, catalogWriteRateLimit, asyncRoute(async (req, res) => {
     if (invalidId(req, res)) return;
     const input = productSchema.safeParse(req.body);
     if (!input.success) {
@@ -422,7 +618,7 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json(productFromRow(result.rows[0]));
   }));
 
-  app.delete("/api/admin/products/:id", authenticate(secret), asyncRoute(async (req, res) => {
+  app.delete("/api/admin/products/:id", catalogAccess, catalogWriteRateLimit, asyncRoute(async (req, res) => {
     if (invalidId(req, res)) return;
     const result = await pool.query("delete from products where id = $1", [req.params.id]);
     if (!result.rowCount) {

@@ -1,22 +1,28 @@
 # JBR Electrical mobile catalog manager
 
-This React + TypeScript Capacitor app manages products through the same API/database used by `https://jbr-electrical.vercel.app`; it does not create a second catalog. The API URL is preconfigured in the ignored `.env.production.local` file and is embedded in APK builds. Database credentials and SMS provider credentials belong only in the private API environment.
+This React + TypeScript Capacitor app manages products through the same API/database used by `https://jbr-electrical.vercel.app`; it does not create a second catalog. The API URL is preconfigured in the ignored `.env.production.local` file and is embedded in APK builds. Database credentials and administrator credentials belong only in the private API environment.
 
-## Production API and OTP setup
+## Production API and password sign-in setup
 
-The API source in `server/index.ts` implements the production OTP endpoints. The live API must be updated with this server code before an APK using OTP sign-in can authenticate. Deploy it to the **same API/database used by the website** so app edits appear on the main website.
+The API source in `server/index.ts` implements username/password sign-in and protected catalog routes. Deploy it to the **same API/database used by the website** so authenticated app edits appear on the main website.
 
 Configure these private server environment variables:
 
 - `DATABASE_URL`: the existing shared PostgreSQL connection string.
 - `JWT_SECRET`: a randomly generated secret of at least 32 characters.
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID`: Twilio Verify credentials.
+- `ADMIN_USERNAME` and `ADMIN_PASSWORD`: the administrator credentials used by the APK. Configure them only in the API host's private environment settings; **never put either value in the repository, `.env.production.local`, or the APK**. Use HTTPS, a unique strong password, and rotate it if shared or exposed.
+- `ENABLE_PUBLIC_CATALOG_WRITES=false` (or unset): keep catalog routes protected by the authenticated session.
+- Optional: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID` to retain SMS OTP sign-in.
 
-Apply the `admin_sessions` table from `schema.sql` to the shared database before deploying. Only +91 8209305040 can request and verify OTPs; this allowlist is enforced by the API in `server/index.ts`. Keep OTP sending behind this API; never put Twilio credentials in the APK. OTP requests are rate-limited.
+Apply the `admin_sessions` and `admin_credentials` tables from `schema.sql` to the shared database before deploying. On first successful password login, the API stores a salted scrypt password hash in `admin_credentials`; subsequent password changes update that hash, not the API environment variable. Password sign-in and changes are rate-limited to five attempts per IP per 15 minutes. Changing the password revokes all refresh sessions; already-issued access tokens expire within 15 minutes. The password is sent only to the API over HTTPS and is not saved on the device.
 
-The app stores its refresh session on the device so sign-in survives app restarts. Short-lived API tokens renew automatically; signing out revokes the server-side refresh session. The production-configured APK does not offer demo sign-in.
+In the APK, open **Settings > Change administrator password**, enter the current password, then enter and confirm a new password of at least 12 characters. You will be returned to sign-in when the change succeeds. Changing the password this way does not require updating `ADMIN_PASSWORD` in the API environment because the database hash takes precedence after initialization.
 
-The APK calls the public API URL from `.env.production.local`; changing that URL requires rebuilding. Product edits are written to the API's database, which must be the same database the website reads.
+The authenticated live-store build stores its refresh session on the device so sign-in survives app restarts. Short-lived API tokens renew automatically; signing out revokes the server-side refresh session. For a device-local demo build with no sign-in, set `VITE_LOCAL_DEMO_MODE=true`; it will not read or write the live store API, and catalog changes stay on that device.
+
+Unauthenticated live catalog editing is available only as an explicit, high-risk opt-in. Set `VITE_PUBLIC_CATALOG_WRITES=true` in the APK build configuration and `ENABLE_PUBLIC_CATALOG_WRITES=true` on the API host to enable it; the API limits public writes to 30 requests per IP per 15 minutes. The app displays a warning, but **anyone who can reach the API can read the full catalog (including inactive products) and add, edit, or delete live products**. This in-memory rate limit is only a basic throttle, not access control, and CORS does not protect the API from non-browser clients. Do not enable this for a public-facing production service unless that exposure is acceptable. Leave both flags false for the authenticated production configuration. Local demo mode overrides the public-write build flag.
+
+The live-store APK calls the public API URL from `.env.production.local`; changing that URL requires rebuilding. Product edits are written to the API's database, which must be the same database the website reads. A local demo APK ignores the API URL and never syncs its catalog with the website.
 
 ## Configure Cloudinary image uploads
 
@@ -48,7 +54,9 @@ Install Android Studio and Android SDK Platform 35 / Build-Tools 35. Set `JAVA_H
 npm run android:apk
 ```
 
-The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. To produce a signed release APK, create a private release keystore (the command prompts for its password):
+The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. For a device-local demo build, set `VITE_LOCAL_DEMO_MODE=true` in `.env.production.local` before building. This disables live API access, requires no sign-in, and stores catalog data only on the device. For a live-store build, set it to `false` and deploy the protected API first. The APK uses the administrator username and password entered at sign-in; those credentials must be configured on the API host, not in the APK. Keep `VITE_PUBLIC_CATALOG_WRITES` and `ENABLE_PUBLIC_CATALOG_WRITES` false.
+
+To produce a signed release APK, create a private release keystore (the command prompts for its password):
 
 ```powershell
 New-Item -ItemType Directory -Path "$env:USERPROFILE\.jbr-admin" -Force

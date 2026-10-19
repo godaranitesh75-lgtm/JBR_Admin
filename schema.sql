@@ -20,6 +20,13 @@ create table if not exists public.admin_sessions (
   revoked_at timestamptz
 );
 
+create table if not exists public.admin_credentials (
+  id integer primary key check (id = 1),
+  username text not null,
+  password_hash text not null,
+  updated_at timestamptz not null default now()
+);
+
 create index if not exists products_active_name_idx
   on public.products (active, name);
 

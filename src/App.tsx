@@ -41,8 +41,10 @@ const STORAGE_KEYS = {
   session: "jbr-admin-session-v1",
 } as const;
 
+const LOCAL_DEMO_MODE = import.meta.env.VITE_LOCAL_DEMO_MODE === "true";
+const PUBLIC_CATALOG_WRITES = !LOCAL_DEMO_MODE && import.meta.env.VITE_PUBLIC_CATALOG_WRITES === "true";
 const BUILD_SETTINGS: AppSettings = {
-  apiUrl: import.meta.env.VITE_PUBLIC_API_URL?.trim() ?? "",
+  apiUrl: LOCAL_DEMO_MODE ? "" : import.meta.env.VITE_PUBLIC_API_URL?.trim() ?? "",
   cloudName: import.meta.env.VITE_CLOUDINARY_CLOUD_NAME?.trim() ?? "",
   uploadPreset: import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET?.trim() ?? "",
 };
@@ -131,7 +133,7 @@ function plural(count: number, singular: string, multiple = `${singular}s`): str
 function safeSettings(): AppSettings {
   const saved = readStorage<Partial<AppSettings> & { supabaseUrl?: string; supabaseKey?: string }>(STORAGE_KEYS.settings, {});
   const migrated: AppSettings = {
-    apiUrl: typeof saved.apiUrl === "string" && saved.apiUrl ? saved.apiUrl : BUILD_SETTINGS.apiUrl,
+    apiUrl: LOCAL_DEMO_MODE ? "" : typeof saved.apiUrl === "string" && saved.apiUrl ? saved.apiUrl : BUILD_SETTINGS.apiUrl,
     cloudName: typeof saved.cloudName === "string" && saved.cloudName ? saved.cloudName : BUILD_SETTINGS.cloudName,
     uploadPreset: typeof saved.uploadPreset === "string" && saved.uploadPreset ? saved.uploadPreset : BUILD_SETTINGS.uploadPreset,
   };
@@ -226,9 +228,8 @@ function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(settings);
   const [loginError, setLoginError] = useState("");
-  const [loginPhone, setLoginPhone] = useState("");
-  const [loginCode, setLoginCode] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
 
   const notify = useCallback((message: string, error = false) => {
     const id = Date.now() + Math.random();
@@ -254,7 +255,7 @@ function App() {
         setSession(null);
         setRemoteAdmin(false);
         setLoginRequired(true);
-        setLoginError(error instanceof Error ? error.message : "Your sign-in session expired. Request a new OTP.");
+        setLoginError(error instanceof Error ? error.message : "Your sign-in session expired. Sign in again.");
         throw error;
       }
       localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(activeSession));
@@ -265,13 +266,29 @@ function App() {
   }, [settings]);
 
   useEffect(() => {
-    const configured = Boolean(settings.apiUrl);
+    const configured = !LOCAL_DEMO_MODE && Boolean(settings.apiUrl);
     if (!configured) {
       setMode("demo");
       setLoginRequired(false);
       return;
     }
     setMode("remote");
+    if (PUBLIC_CATALOG_WRITES) {
+      setSession(null);
+      setLoginRequired(false);
+      void fetch(`${apiBase(settings)}/api/admin/products`)
+        .then(readResponse<Product[]>)
+        .then((catalog) => {
+          if (!Array.isArray(catalog)) throw new Error("The server returned an invalid product catalog.");
+          setProducts(catalog);
+          setRemoteAdmin(true);
+        })
+        .catch((error: unknown) => {
+          setRemoteAdmin(false);
+          notify(error instanceof Error ? `Could not load the live catalog: ${error.message}` : "Could not load the live catalog.", true);
+        });
+      return;
+    }
     const savedSession = readSession();
     if (!savedSession?.access_token || !savedSession.user?.id) {
       setLoginRequired(true);
@@ -286,7 +303,7 @@ function App() {
 
   const verifyAdministrator = useCallback(async (config: AppSettings, savedAuth: AuthSession) => {
     try {
-      if (!savedAuth.refresh_token) throw new Error("This saved sign-in needs to be renewed. Please request an OTP.");
+      if (!savedAuth.refresh_token) throw new Error("This saved sign-in needs to be renewed. Please sign in again.");
       const auth = await renewSession(config, savedAuth.refresh_token);
       localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(auth));
       const identity = await readResponse<{ user: AuthSession["user"] }>(await fetch(`${apiBase(config)}/api/auth/me`, {
@@ -356,7 +373,34 @@ function App() {
       saveDemoProducts(next);
       return;
     }
-    if (!session || !remoteAdmin) throw new Error("Sign in with an approved store administrator account to edit products.");
+    if (!remoteAdmin) throw new Error("The live catalog is not connected. Wait for it to load before editing products.");
+    if (PUBLIC_CATALOG_WRITES) {
+      const exists = products.some((item) => item.id === product.id);
+      const payload = {
+        name: product.name,
+        sku: product.sku,
+        category: product.category,
+        description: product.description,
+        price: product.price,
+        stock: product.stock,
+        image_url: product.image_url,
+        active: product.active,
+      };
+      const url = `${apiBase(settings)}/api/admin/products${exists ? `/${encodeURIComponent(product.id)}` : ""}`;
+      const response = await fetch(url, {
+        method: exists ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const saved = await readResponse<Product>(response);
+      if (!saved?.id) throw new Error("The server did not return the saved product.");
+      setProducts((current) => {
+        const alreadyExists = current.some((item) => item.id === saved.id);
+        return alreadyExists ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current];
+      });
+      return;
+    }
+    if (!session) throw new Error("Sign in with an approved store administrator account to edit products.");
     const { id } = product;
     const payload = {
       name: product.name,
@@ -390,8 +434,13 @@ function App() {
     try {
       if (mode === "demo") {
         saveDemoProducts(products.filter((item) => item.id !== product.id));
+      } else if (PUBLIC_CATALOG_WRITES) {
+        if (!remoteAdmin) throw new Error("The live catalog is not connected. Wait for it to load before editing products.");
+        const response = await fetch(`${apiBase(settings)}/api/admin/products/${encodeURIComponent(product.id)}`, { method: "DELETE" });
+        await readResponse<unknown>(response);
+        setProducts((current) => current.filter((item) => item.id !== product.id));
       } else {
-        if (!session || !remoteAdmin) throw new Error("Sign in with an approved store administrator account to edit products.");
+        if (!remoteAdmin || !session) throw new Error("Sign in with an approved store administrator account to edit products.");
         const response = await authenticatedFetch(session, `${apiBase(settings)}/api/admin/products/${encodeURIComponent(product.id)}`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${session.access_token}` },
@@ -419,6 +468,10 @@ function App() {
 
   const saveDatabaseSettings = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (LOCAL_DEMO_MODE) {
+      notify("This build is in local demo mode. Rebuild without VITE_LOCAL_DEMO_MODE to connect the live store.", true);
+      return;
+    }
     const url = settingsDraft.apiUrl.trim().replace(/\/+$/, "").replace(/\/api$/, "");
     if (url && !/^https:\/\/[a-zA-Z0-9.-]+(?::\d+)?(?:\/.*)?$/.test(url) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(url)) {
       notify("Enter a valid HTTPS API server URL. HTTP is allowed only for localhost.", true);
@@ -426,9 +479,14 @@ function App() {
     }
     const next = { ...settingsDraft, apiUrl: url };
     try {
+      let publicCatalog: Product[] | undefined;
       if (url) {
         const response = await fetch(`${url}/api/health`);
         await readResponse<{ status: string }>(response);
+        if (PUBLIC_CATALOG_WRITES) {
+          publicCatalog = await readResponse<Product[]>(await fetch(`${apiBase(next)}/api/admin/products`));
+          if (!Array.isArray(publicCatalog)) throw new Error("The server returned an invalid product catalog.");
+        }
       }
       localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(next));
       localStorage.removeItem(STORAGE_KEYS.session);
@@ -438,12 +496,21 @@ function App() {
       setRemoteAdmin(false);
       if (url) {
         setMode("remote");
-        setLoginRequired(true);
-        setLoginError("");
-        notify("JBR store API connected. Sign in with an approved mobile number using SMS OTP.");
+        if (PUBLIC_CATALOG_WRITES) {
+          setProducts(publicCatalog ?? []);
+          setRemoteAdmin(true);
+          setLoginRequired(false);
+          setLoginError("");
+          notify("Live catalog connected. Anyone with access to this API can edit or delete products.");
+        } else {
+          setLoginRequired(true);
+          setLoginError("");
+          notify("JBR store API connected. Sign in with your administrator username and password.");
+        }
       } else {
         setMode("demo");
         setLoginRequired(false);
+        setRemoteAdmin(false);
         notify("Database disconnected. Your demo catalog is ready.");
       }
     } catch (error) {
@@ -468,6 +535,21 @@ function App() {
     }
   };
 
+  const changeAdminPassword = async (currentPassword: string, newPassword: string) => {
+    if (!session) throw new Error("Sign in to change the administrator password.");
+    const response = await authenticatedFetch(session, `${apiBase(settings)}/api/auth/password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+    if (!response.ok) await readResponse<unknown>(response);
+    localStorage.removeItem(STORAGE_KEYS.session);
+    setSession(null);
+    setRemoteAdmin(false);
+    setLoginRequired(true);
+    setLoginError("Password changed. Sign in again with your new password.");
+  };
+
   const disconnectDatabase = () => {
     const next = { ...settings, apiUrl: "" };
     try {
@@ -485,38 +567,19 @@ function App() {
     }
   };
 
-  const requestOtp = async (event: FormEvent<HTMLFormElement>) => {
+  const signIn = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoginError("");
     setLoading(true);
     try {
-      const response = await fetch(`${apiBase(settings)}/api/auth/otp/start`, {
+      const response = await fetch(`${apiBase(settings)}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: loginPhone.trim() }),
-      });
-      await readResponse<{ status: string }>(response);
-      setOtpSent(true);
-    } catch (error) {
-      setLoginError(error instanceof Error ? error.message : "Could not send an OTP. Check your connection and try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const verifyOtp = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setLoginError("");
-    setLoading(true);
-    try {
-      const response = await fetch(`${apiBase(settings)}/api/auth/otp/verify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: loginPhone.trim(), code: loginCode.trim() }),
+        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
       });
       const loginResult = await readResponse<AuthSession>(response);
       if (!loginResult.access_token || !loginResult.refresh_token || !loginResult.user?.id) throw new Error("The server did not return a valid sign-in session.");
-      if (loginResult.user.role !== "ADMIN") throw new Error("This mobile number does not have JBR Electrical administrator access.");
+      if (loginResult.user.role !== "ADMIN") throw new Error("This account does not have JBR Electrical administrator access.");
       const authResult: AuthSession = loginResult;
       const catalogResponse = await fetch(`${apiBase(settings)}/api/admin/products`, {
         headers: { Authorization: `Bearer ${authResult.access_token}` },
@@ -528,10 +591,10 @@ function App() {
       setRemoteAdmin(true);
       setMode("remote");
       setLoginRequired(false);
-      setLoginCode("");
+      setLoginPassword("");
       notify("Welcome to your JBR Electrical admin workspace.");
     } catch (error) {
-      setLoginError(error instanceof Error ? error.message : "Could not verify the OTP. Check your connection and try again.");
+      setLoginError(error instanceof Error ? error.message : "Could not sign in. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
@@ -718,7 +781,9 @@ function App() {
             exportCsv={() => exportCatalog("csv")}
           />}
           {view === "storefront" && <StorefrontView products={publishedProducts} count={publishedProducts.length} search={storeSearch} setSearch={setStoreSearch} changeView={changeView} />}
-          {view === "settings" && <SettingsView settings={settingsDraft} setSettings={setSettingsDraft} databaseConnected={mode === "remote" && remoteAdmin} saveDatabase={saveDatabaseSettings} disconnectDatabase={disconnectDatabase} saveCloud={saveCloudSettings} exportJson={() => exportCatalog("json")} importCatalog={importCatalog} notify={notify} />}
+          {LOCAL_DEMO_MODE && <div className="site-integration-warning" role="note"><Icon name="info" /><div><strong>Local demo mode — no sign-in required.</strong><p>Catalog changes are saved only on this device. They do not update the live JBR website or database.</p></div></div>}
+          {PUBLIC_CATALOG_WRITES && <div className="site-integration-warning" role="alert"><Icon name="alert" /><div><strong>Public live editing is enabled.</strong><p>Anyone who can reach this API may view the full catalog and add, change, or delete products in the live database. Rate limiting is only a basic throttle, not access control.</p></div></div>}
+          {view === "settings" && <SettingsView settings={settingsDraft} setSettings={setSettingsDraft} databaseConnected={mode === "remote" && remoteAdmin} localDemoOnly={LOCAL_DEMO_MODE} publicCatalogWrites={PUBLIC_CATALOG_WRITES} canChangePassword={mode === "remote" && remoteAdmin && Boolean(session)} changePassword={changeAdminPassword} saveDatabase={saveDatabaseSettings} disconnectDatabase={disconnectDatabase} saveCloud={saveCloudSettings} exportJson={() => exportCatalog("json")} importCatalog={importCatalog} notify={notify} />}
         </div>}
       </main>
 
@@ -735,10 +800,9 @@ function App() {
         onTakePhoto={takeProductPhoto} notify={notify}
       />}
       {loginRequired && <LoginDialog
-        onRequestOtp={requestOtp} onVerifyOtp={verifyOtp} loading={loading} error={loginError}
-        phone={loginPhone} setPhone={setLoginPhone} code={loginCode} setCode={setLoginCode} onDemo={useDemoMode}
-        otpSent={otpSent} allowDemo={!BUILD_SETTINGS.apiUrl}
-        onChangeNumber={() => { setOtpSent(false); setLoginCode(""); setLoginError(""); }}
+        onSignIn={signIn} loading={loading} error={loginError}
+        username={loginUsername} setUsername={setLoginUsername} password={loginPassword} setPassword={setLoginPassword} onDemo={useDemoMode}
+        allowDemo={!BUILD_SETTINGS.apiUrl}
         onClose={() => { setLoginRequired(false); setMode("demo"); }}
       />}
       {loading && <div className="busy-indicator" role="status" aria-live="polite"><span className="spinner" /> Working…</div>}
@@ -942,10 +1006,14 @@ function StorefrontView({ products, count, search, setSearch, changeView }: { pr
   </section>;
 }
 
-function SettingsView({ settings, setSettings, databaseConnected, saveDatabase, disconnectDatabase, saveCloud, exportJson, importCatalog, notify }: {
+function SettingsView({ settings, setSettings, databaseConnected, localDemoOnly, publicCatalogWrites, canChangePassword, changePassword, saveDatabase, disconnectDatabase, saveCloud, exportJson, importCatalog, notify }: {
   settings: AppSettings;
   setSettings: Dispatch<SetStateAction<AppSettings>>;
   databaseConnected: boolean;
+  localDemoOnly: boolean;
+  publicCatalogWrites: boolean;
+  canChangePassword: boolean;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   saveDatabase: (event: FormEvent<HTMLFormElement>) => void;
   disconnectDatabase: () => void;
   saveCloud: (event: FormEvent<HTMLFormElement>) => void;
@@ -953,20 +1021,64 @@ function SettingsView({ settings, setSettings, databaseConnected, saveDatabase, 
   importCatalog: (event: ChangeEvent<HTMLInputElement>) => void;
   notify: (message: string, error?: boolean) => void;
 }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
   const update = (key: keyof AppSettings, value: string) => setSettings((current) => ({ ...current, [key]: value }));
+  const submitPasswordChange = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setPasswordError("");
+    if (newPassword.length < 12) {
+      setPasswordError("Use at least 12 characters for your new password.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError("The new password and confirmation do not match.");
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      notify("Password changed. Sign in again with your new password.");
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : "Could not change the password.");
+    } finally {
+      setChangingPassword(false);
+    }
+  };
   return <section className="view-panel is-visible">
-    <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> CONNECT YOUR STORE</div><h1>Settings<span className="heading-period">.</span></h1><p>Connect the existing JBR store API and Cloudinary image storage.</p></div><span className="settings-lock"><Icon name="shield" /> Store database credentials stay server-side</span></div>
-    <div className="site-integration-warning" role="note"><Icon name="info" /><div><strong>The APK is preconfigured to use the live JBR store API.</strong><p>Deploy the backend changes from the JBR website source before using the APK. They enable the Vercel and Android origins and add the admin catalog endpoints the APK needs. The database connection stays on the backend.</p></div></div>
+    <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> {localDemoOnly ? "LOCAL CATALOG" : "CONNECT YOUR STORE"}</div><h1>Settings<span className="heading-period">.</span></h1><p>{localDemoOnly ? "Manage local demo storage and image settings." : "Connect the existing JBR store API and Cloudinary image storage."}</p></div><span className="settings-lock"><Icon name="shield" /> Store database credentials stay server-side</span></div>
+    {localDemoOnly
+      ? <div className="site-integration-warning" role="note"><Icon name="info" /><div><strong>This build is using a local demo catalog.</strong><p>Changes stay on this device and are not sent to the live website. Rebuild without VITE_LOCAL_DEMO_MODE to enable the protected live API.</p></div></div>
+      : publicCatalogWrites
+        ? <div className="site-integration-warning" role="alert"><Icon name="alert" /><div><strong>Public live catalog access is enabled without authentication.</strong><p>Anyone who can reach this API can view the full catalog and add, edit, or delete products. Rate limiting is only a basic throttle, not access control.</p></div></div>
+        : <div className="site-integration-warning" role="note"><Icon name="info" /><div><strong>The APK is preconfigured to use the live JBR store API.</strong><p>Deploy the backend changes from the JBR website source before using the APK. They enable the Vercel and Android origins and add the admin catalog endpoints the APK needs. The database connection stays on the backend.</p></div></div>}
     <div className="settings-layout">
       <section className="panel settings-card">
-        <div className="settings-card-heading"><span className="settings-large-icon database-icon"><Icon name="database" /></span><div><h2>Live shop database</h2><p>Manage the same PostgreSQL catalog the JBR website uses.</p></div><span className={`integration-state ${databaseConnected ? "is-connected" : ""}`}>{databaseConnected ? "Connected" : settings.apiUrl ? "Needs sign-in" : "Not connected"}</span></div>
-        <form className="settings-form" onSubmit={saveDatabase}>
-          <label className="field-label" htmlFor="api-url">JBR store API URL</label><input className="text-input" id="api-url" type="url" placeholder="https://jbrelec.onrender.com" autoComplete="url" value={settings.apiUrl} onChange={(event) => update("apiUrl", event.target.value)} />
+        <div className="settings-card-heading"><span className="settings-large-icon database-icon"><Icon name="database" /></span><div><h2>{localDemoOnly ? "Local demo catalog" : "Live shop database"}</h2><p>{localDemoOnly ? "Catalog changes are saved on this device only." : "Manage the same PostgreSQL catalog the JBR website uses."}</p></div><span className={`integration-state ${databaseConnected ? "is-connected" : ""}`}>{localDemoOnly ? "Local only" : databaseConnected ? "Connected" : settings.apiUrl ? publicCatalogWrites ? "Needs API opt-in" : "Needs sign-in" : "Not connected"}</span></div>
+        {!localDemoOnly && <form className="settings-form" onSubmit={saveDatabase}>
+          <label className="field-label" htmlFor="api-url">JBR store API URL</label><input className="text-input" id="api-url" type="url" placeholder="https://your-api.example" autoComplete="url" value={settings.apiUrl} onChange={(event) => update("apiUrl", event.target.value)} />
           <p className="field-help">This must be the same API that serves the JBR website. Database credentials stay on the server; never enter or bundle them in this app. HTTPS is required outside localhost.</p>
           <div className="settings-actions"><button className="button button-primary" type="submit"><Icon name="link" /> Save &amp; connect</button><button className="button button-secondary" type="button" onClick={disconnectDatabase}>Disconnect</button></div>
-        </form>
-        <div className="setup-inline"><span className="setup-step">1</span><span>The existing website API uses its configured database. Do not create a second catalog or paste its database URL into the APK.</span></div>
+        </form>}
+        <div className="setup-inline"><span className="setup-step">1</span><span>{localDemoOnly ? "Use Export backup below to save or move a copy of this device's demo catalog." : "The existing website API uses its configured database. Do not create a second catalog or paste its database URL into the APK."}</span></div>
       </section>
+      {canChangePassword && <section className="panel settings-card">
+        <div className="settings-card-heading"><span className="settings-large-icon database-icon"><Icon name="lock" /></span><div><h2>Change administrator password</h2><p>Verify your current password before setting a new one.</p></div></div>
+        <form className="settings-form" onSubmit={submitPasswordChange}>
+          <label className="field-label" htmlFor="current-admin-password">Current password</label><input className="text-input" id="current-admin-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
+          <label className="field-label" htmlFor="new-admin-password">New password</label><input className="text-input" id="new-admin-password" type="password" autoComplete="new-password" minLength={12} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
+          <label className="field-label" htmlFor="confirm-admin-password">Confirm new password</label><input className="text-input" id="confirm-admin-password" type="password" autoComplete="new-password" minLength={12} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required />
+          <p className="field-help">Use at least 12 characters. Changing the password revokes all refresh sessions; existing short-lived access tokens expire within 15 minutes. You will need to sign in again here.</p>
+          {passwordError && <div className="form-error" role="alert">{passwordError}</div>}
+          <div className="settings-actions"><button className="button button-primary" type="submit" disabled={changingPassword}><Icon name="lock" />{changingPassword ? "Changing…" : "Change password"}</button></div>
+        </form>
+      </section>}
       <section className="panel settings-card">
         <div className="settings-card-heading"><span className="settings-large-icon cloud-icon"><Icon name="image" /></span><div><h2>Cloudinary image storage</h2><p>Upload optimized product photos directly to your Cloudinary account.</p></div><span className={`integration-state ${settings.cloudName && settings.uploadPreset ? "is-connected" : ""}`}>{settings.cloudName && settings.uploadPreset ? "Ready" : "Not connected"}</span></div>
         <form className="settings-form" onSubmit={saveCloud}>
@@ -977,8 +1089,12 @@ function SettingsView({ settings, setSettings, databaseConnected, saveDatabase, 
         </form>
       </section>
       <section className="panel setup-guide">
-        <div className="guide-heading"><span className="settings-large-icon guide-icon"><Icon name="book" /></span><div><h2>Getting your store online</h2><p>Three quick steps to connect the catalog to your website.</p></div><a href="./README.md" className="guide-link" target="_blank" rel="noreferrer">Full setup guide <span aria-hidden="true">↗</span></a></div>
-        <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the existing backend</strong><p>Deploy this API's OTP endpoints, CORS settings, and protected product routes to the API shared with the website.</p></div></div><div className="guide-step"><span>02</span><div><strong>Sign in with an approved mobile</strong><p>Request an SMS OTP from one of the three approved JBR mobile numbers. The app keeps the session on this device until sign-out or token expiry.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here, or bake them into a shared APK build to enable new image uploads.</p></div></div></div>
+        <div className="guide-heading"><span className="settings-large-icon guide-icon"><Icon name="book" /></span><div><h2>{localDemoOnly ? "About local demo mode" : "Getting your store online"}</h2><p>{localDemoOnly ? "This build does not connect to the live shop." : "Three quick steps to connect the catalog to your website."}</p></div><a href="./README.md" className="guide-link" target="_blank" rel="noreferrer">Full setup guide <span aria-hidden="true">↗</span></a></div>
+        {localDemoOnly
+          ? <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Manage this device's catalog</strong><p>Products are stored locally on this device and remain separate from the live website catalog.</p></div></div><div className="guide-step"><span>02</span><div><strong>Export a backup</strong><p>Use Catalog backup to export JSON before clearing app data or changing devices.</p></div></div><div className="guide-step"><span>03</span><div><strong>Restore live service later</strong><p>Rebuild without VITE_LOCAL_DEMO_MODE after the protected production API is ready.</p></div></div></div>
+          : publicCatalogWrites
+            ? <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the API opt-in</strong><p>Set ENABLE_PUBLIC_CATALOG_WRITES=true on the API host and deploy. Keep the API rate limit enabled.</p></div></div><div className="guide-step"><span>02</span><div><strong>Connect to the shared database</strong><p>Use the API that serves the website, with its existing database configuration. The APK never connects directly to PostgreSQL.</p></div></div><div className="guide-step"><span>03</span><div><strong>Accept the public access risk</strong><p>No login is required: anyone who can reach the API may update or delete products in the live catalog.</p></div></div></div>
+            : <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the protected backend</strong><p>Deploy the API to the same database used by the website and configure ADMIN_USERNAME and ADMIN_PASSWORD in the host's private environment settings.</p></div></div><div className="guide-step"><span>02</span><div><strong>Sign in with your admin credentials</strong><p>The API checks the credentials and issues a short-lived session. The password is not saved on the device or included in the APK.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here, or bake them into a shared APK build to enable new image uploads.</p></div></div></div>}
         <div className="guide-footer"><Icon name="lock" /> Database credentials and signing secrets stay on the backend, never in the APK.</div>
       </section>
       <section className="panel data-tools-card"><div><h2>Catalog backup</h2><p>Export or restore your product data as a JSON file.</p></div><div className="data-tools-actions"><button className="button button-secondary" onClick={exportJson}><Icon name="download" /> Export backup</button><label className="button button-secondary import-button"><Icon name="upload" /> Import backup<input type="file" accept="application/json,.json" hidden onChange={importCatalog} /></label></div></section>
@@ -1107,32 +1223,28 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
   </div>;
 }
 
-function LoginDialog({ onRequestOtp, onVerifyOtp, loading, error, phone, setPhone, code, setCode, onDemo, onClose, otpSent, allowDemo, onChangeNumber }: {
-  onRequestOtp: (event: FormEvent<HTMLFormElement>) => void;
-  onVerifyOtp: (event: FormEvent<HTMLFormElement>) => void;
+function LoginDialog({ onSignIn, loading, error, username, setUsername, password, setPassword, onDemo, onClose, allowDemo }: {
+  onSignIn: (event: FormEvent<HTMLFormElement>) => void;
   loading: boolean;
   error: string;
-  phone: string;
-  setPhone: (phone: string) => void;
-  code: string;
-  setCode: (code: string) => void;
+  username: string;
+  setUsername: (username: string) => void;
+  password: string;
+  setPassword: (password: string) => void;
   onDemo: () => void;
   onClose: () => void;
-  otpSent: boolean;
   allowDemo: boolean;
-  onChangeNumber: () => void;
 }) {
   return <div className="modal-backdrop login-backdrop"><section className="login-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title">
     <a className="brand login-brand" href="#" onClick={(event) => event.preventDefault()}><BrandMark /><span className="brand-copy"><strong>JBR <span>Electrical</span></strong><small>STORE MANAGEMENT</small></span></a>
     <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">POWERING YOUR CATALOG</span></div>
-    <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">Welcome back<span className="heading-period">.</span></h1><p>{otpSent ? `Enter the verification code sent to ${phone}.` : "Sign in with an approved mobile number. We’ll send a one-time verification code by SMS."}</p>
-      <form onSubmit={otpSent ? onVerifyOtp : onRequestOtp}>
-        <label className="field-label" htmlFor="login-phone">Mobile number</label><input className="text-input" id="login-phone" type="tel" inputMode="tel" autoComplete="tel" placeholder="10-digit mobile number" value={phone} onChange={(event) => setPhone(event.target.value)} disabled={otpSent} required />
-        {otpSent && <><label className="field-label" htmlFor="login-code">One-time password</label><input className="text-input" id="login-code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{4,10}" maxLength={10} placeholder="Enter SMS code" value={code} onChange={(event) => setCode(event.target.value)} required /></>}
+    <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">Welcome back<span className="heading-period">.</span></h1><p>Sign in with your JBR admin username and password.</p>
+      <form onSubmit={onSignIn}>
+        <label className="field-label" htmlFor="login-username">Username</label><input className="text-input" id="login-username" type="text" autoComplete="username" placeholder="Admin username" value={username} onChange={(event) => setUsername(event.target.value)} required />
+        <label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete="current-password" placeholder="Admin password" value={password} onChange={(event) => setPassword(event.target.value)} required />
         {error && <div className="form-error login-error" role="alert">{error}</div>}
-        <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : otpSent ? "Verify & sign in" : "Send OTP"} <span aria-hidden="true">→</span></button>
+        <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : "Sign in"} <span aria-hidden="true">→</span></button>
       </form>
-      {otpSent && <button className="login-back-link" onClick={onChangeNumber}>Use a different number</button>}
       {allowDemo && <button className="demo-login" onClick={onDemo}>Explore with demo catalog <span aria-hidden="true">→</span></button>}
       <p className="login-security"><Icon name="lock" /> Your sign-in stays active on this device until you sign out.</p>
       {allowDemo && <button className="login-back-link" onClick={onClose}>Back to the demo catalog</button>}
