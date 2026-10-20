@@ -19,6 +19,7 @@ type AuthOptions = {
   allowPublicCatalogWrites?: boolean;
   adminUsername?: string;
   adminPassword?: string;
+  adminRegistrationCode?: string;
   sendOtp?: (phone: string) => Promise<void>;
   verifyOtp?: (phone: string, code: string) => Promise<boolean>;
 };
@@ -50,9 +51,20 @@ const phoneSchema = z.object({
 const otpSchema = phoneSchema.extend({
   code: z.string().trim().regex(/^\d{4,10}$/, "Enter the OTP sent to your mobile number."),
 }).strict();
-const passwordLoginSchema = z.object({
-  username: z.string().trim().min(1).max(64),
-  password: z.string().min(1).max(256),
+const passwordLoginSchema = z.union([
+  z.object({
+    email: z.string().trim().min(1).max(254),
+    password: z.string().min(1).max(256),
+  }).strict(),
+  z.object({
+    username: z.string().trim().min(1).max(64),
+    password: z.string().min(1).max(256),
+  }).strict(),
+]);
+const adminRegistrationSchema = z.object({
+  email: z.string().trim().email().max(254),
+  password: z.string().min(12).max(256),
+  registration_code: z.string().min(1).max(256),
 }).strict();
 const changePasswordSchema = z.object({
   current_password: z.string().min(1).max(256),
@@ -99,8 +111,9 @@ const jwtSecret = process.env.JWT_SECRET;
 const databaseUrl = process.env.DATABASE_URL;
 const isProduction = process.env.NODE_ENV === "production";
 const configuredAllowedPhones = ["+918209305040"];
-const configuredAdminUsername = process.env.ADMIN_USERNAME;
+const configuredAdminUsername = process.env.ADMIN_USERNAME ?? process.env.ADMIN_EMAIL;
 const configuredAdminPassword = process.env.ADMIN_PASSWORD;
+const configuredAdminRegistrationCode = process.env.ADMIN_REGISTRATION_CODE;
 
 function assertConfiguration(): void {
   if (!databaseUrl) throw new Error("DATABASE_URL is required. Add your Neon connection string to the private server environment.");
@@ -108,11 +121,14 @@ function assertConfiguration(): void {
   const hasUsername = Boolean(configuredAdminUsername);
   const hasPassword = Boolean(configuredAdminPassword);
   if (hasUsername !== hasPassword) {
-    throw new Error("ADMIN_USERNAME and ADMIN_PASSWORD must both be configured for password sign-in.");
+    throw new Error("ADMIN_USERNAME (or ADMIN_EMAIL) and ADMIN_PASSWORD must both be configured for password sign-in.");
+  }
+  if (configuredAdminRegistrationCode && configuredAdminRegistrationCode.length < 32) {
+    throw new Error("ADMIN_REGISTRATION_CODE must contain at least 32 randomly generated characters.");
   }
   const hasTwilio = Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_VERIFY_SERVICE_SID);
-  if (!hasUsername && !hasTwilio) {
-    throw new Error("Configure ADMIN_USERNAME and ADMIN_PASSWORD, or configure all Twilio Verify variables for sign-in.");
+  if (!hasUsername && !hasTwilio && !configuredAdminRegistrationCode) {
+    throw new Error("Configure ADMIN_USERNAME and ADMIN_PASSWORD, ADMIN_REGISTRATION_CODE for first-admin signup, or all Twilio Verify variables for sign-in.");
   }
 }
 
@@ -265,6 +281,7 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
   const allowedPhones = new Set(options.allowedPhones ?? configuredAllowedPhones);
   const adminUsername = options.adminUsername ?? configuredAdminUsername;
   const adminPassword = options.adminPassword ?? configuredAdminPassword;
+  const adminRegistrationCode = options.adminRegistrationCode ?? configuredAdminRegistrationCode;
   const allowPublicCatalogWrites = options.allowPublicCatalogWrites
     ?? process.env.ENABLE_PUBLIC_CATALOG_WRITES === "true";
   const catalogAccess = allowPublicCatalogWrites
@@ -326,6 +343,61 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json({ status: "ok", database: "connected" });
   }));
 
+  app.post("/api/auth/register", rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }), asyncRoute(async (req, res) => {
+    const input = adminRegistrationSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "Enter a valid email, a password of at least 12 characters, and the one-time setup code.");
+      return;
+    }
+    if (!adminRegistrationCode) {
+      publicError(res, 503, "First-admin signup is not configured. Ask the API owner to configure ADMIN_REGISTRATION_CODE.");
+      return;
+    }
+    const existing = await pool.query<{ username: string; password_hash: string }>(
+      "select username, password_hash from admin_credentials where id = 1",
+    );
+    if (existing.rows[0]) {
+      publicError(res, 409, "An administrator account has already been registered. Sign in instead.");
+      return;
+    }
+    if (!credentialsMatch(input.data.registration_code, adminRegistrationCode)) {
+      publicError(res, 403, "The one-time setup code is incorrect.");
+      return;
+    }
+    const phone = [...allowedPhones][0];
+    if (!phone) {
+      publicError(res, 503, "Administrator sign-in is not configured on this API.");
+      return;
+    }
+    const passwordHash = await hashPassword(input.data.password);
+    const inserted = await pool.query<{ username: string; password_hash: string }>(
+      `insert into admin_credentials (id, username, password_hash)
+       values (1, $1, $2)
+       on conflict (id) do nothing
+       returning username, password_hash`,
+      [input.data.email.toLowerCase(), passwordHash],
+    );
+    if (!inserted.rows[0]) {
+      publicError(res, 409, "An administrator account has already been registered. Sign in instead.");
+      return;
+    }
+    const refreshToken = randomBytes(48).toString("base64url");
+    await pool.query(
+      "insert into admin_sessions (id, phone, refresh_token_hash) values ($1, $2, $3)",
+      [randomUUID(), phone, hashRefreshToken(refreshToken)],
+    );
+    res.status(201).json({
+      access_token: createAccessToken(secret, phone),
+      refresh_token: refreshToken,
+      user: { id: phone, phone, role: "ADMIN" },
+    });
+  }));
+
   app.post("/api/auth/login", rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 5,
@@ -334,22 +406,30 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
   }), asyncRoute(async (req, res) => {
     const input = passwordLoginSchema.safeParse(req.body);
     if (!input.success) {
-      publicError(res, 400, "Enter a valid username and password.");
+      publicError(res, 400, "Enter a valid email or username and password.");
       return;
     }
-    if (!adminUsername || !adminPassword) {
-      publicError(res, 503, "Username and password sign-in is not configured on this API.");
-      return;
-    }
+    const loginIdentity = "email" in input.data ? input.data.email.toLowerCase() : input.data.username;
     const stored = await pool.query<{ username: string; password_hash: string }>(
       "select username, password_hash from admin_credentials where id = 1",
     );
     let credential = stored.rows[0];
-    let valid = credential
-      ? credentialsMatch(input.data.username, credential.username) && await verifyPassword(input.data.password, credential.password_hash)
-      : credentialsMatch(input.data.username, adminUsername) && credentialsMatch(input.data.password, adminPassword);
+    let valid: boolean;
+    if (credential) {
+      const storedIdentity = "email" in input.data ? credential.username.toLowerCase() : credential.username;
+      valid = credentialsMatch(loginIdentity, storedIdentity)
+        && await verifyPassword(input.data.password, credential.password_hash);
+    } else {
+      if (!adminUsername || !adminPassword) {
+        publicError(res, 503, "Email/username and password sign-in is not configured on this API.");
+        return;
+      }
+      const configuredIdentity = "email" in input.data ? adminUsername.toLowerCase() : adminUsername;
+      valid = credentialsMatch(loginIdentity, configuredIdentity)
+        && credentialsMatch(input.data.password, adminPassword);
+    }
     if (!valid) {
-      publicError(res, 401, "The username or password is incorrect.");
+      publicError(res, 401, "The email/username or password is incorrect.");
       return;
     }
     if (!credential) {
@@ -368,7 +448,7 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
         );
         credential = latest.rows[0];
         valid = Boolean(credential
-          && credentialsMatch(input.data.username, credential.username)
+          && credentialsMatch(loginIdentity, credential.username)
           && await verifyPassword(input.data.password, credential.password_hash));
         if (!valid) {
           publicError(res, 401, "The username or password is incorrect.");

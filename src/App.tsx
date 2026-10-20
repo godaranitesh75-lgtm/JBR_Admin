@@ -228,7 +228,7 @@ function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(settings);
   const [loginError, setLoginError] = useState("");
-  const [loginUsername, setLoginUsername] = useState("");
+  const [loginEmail, setLoginEmail] = useState("niteshgodara1845@gmail.com");
   const [loginPassword, setLoginPassword] = useState("");
 
   const notify = useCallback((message: string, error = false) => {
@@ -567,6 +567,23 @@ function App() {
     }
   };
 
+  const completeSignIn = async (loginResult: AuthSession) => {
+    if (!loginResult.access_token || !loginResult.refresh_token || !loginResult.user?.id) throw new Error("The server did not return a valid sign-in session.");
+    if (loginResult.user.role !== "ADMIN") throw new Error("This account does not have JBR Electrical administrator access.");
+    const catalogResponse = await fetch(`${apiBase(settings)}/api/admin/products`, {
+      headers: { Authorization: `Bearer ${loginResult.access_token}` },
+    });
+    const remoteProducts = await readResponse<Product[]>(catalogResponse);
+    localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(loginResult));
+    setProducts(remoteProducts);
+    setSession(loginResult);
+    setRemoteAdmin(true);
+    setMode("remote");
+    setLoginRequired(false);
+    setLoginPassword("");
+    notify("Welcome to your JBR Electrical admin workspace.");
+  };
+
   const signIn = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoginError("");
@@ -575,26 +592,33 @@ function App() {
       const response = await fetch(`${apiBase(settings)}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
       });
-      const loginResult = await readResponse<AuthSession>(response);
-      if (!loginResult.access_token || !loginResult.refresh_token || !loginResult.user?.id) throw new Error("The server did not return a valid sign-in session.");
-      if (loginResult.user.role !== "ADMIN") throw new Error("This account does not have JBR Electrical administrator access.");
-      const authResult: AuthSession = loginResult;
-      const catalogResponse = await fetch(`${apiBase(settings)}/api/admin/products`, {
-        headers: { Authorization: `Bearer ${authResult.access_token}` },
-      });
-      const remoteProducts = await readResponse<Product[]>(catalogResponse);
-      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(authResult));
-      setProducts(remoteProducts);
-      setSession(authResult);
-      setRemoteAdmin(true);
-      setMode("remote");
-      setLoginRequired(false);
-      setLoginPassword("");
-      notify("Welcome to your JBR Electrical admin workspace.");
+      await completeSignIn(await readResponse<AuthSession>(response));
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "Could not sign in. Check your connection and try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const registerAdmin = async (event: FormEvent<HTMLFormElement>, registrationCode: string) => {
+    event.preventDefault();
+    setLoginError("");
+    setLoading(true);
+    try {
+      const response = await fetch(`${apiBase(settings)}/api/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: loginEmail,
+          password: loginPassword,
+          registration_code: registrationCode,
+        }),
+      });
+      await completeSignIn(await readResponse<AuthSession>(response));
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "Could not create the administrator account. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
@@ -800,8 +824,8 @@ function App() {
         onTakePhoto={takeProductPhoto} notify={notify}
       />}
       {loginRequired && <LoginDialog
-        onSignIn={signIn} loading={loading} error={loginError}
-        username={loginUsername} setUsername={setLoginUsername} password={loginPassword} setPassword={setLoginPassword} onDemo={useDemoMode}
+        onSignIn={signIn} onRegister={registerAdmin} loading={loading} error={loginError}
+        email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} onDemo={useDemoMode}
         allowDemo={!BUILD_SETTINGS.apiUrl}
         onClose={() => { setLoginRequired(false); setMode("demo"); }}
       />}
@@ -1223,28 +1247,39 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
   </div>;
 }
 
-function LoginDialog({ onSignIn, loading, error, username, setUsername, password, setPassword, onDemo, onClose, allowDemo }: {
+function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, password, setPassword, onDemo, onClose, allowDemo }: {
   onSignIn: (event: FormEvent<HTMLFormElement>) => void;
+  onRegister: (event: FormEvent<HTMLFormElement>, registrationCode: string) => void;
   loading: boolean;
   error: string;
-  username: string;
-  setUsername: (username: string) => void;
+  email: string;
+  setEmail: (email: string) => void;
   password: string;
   setPassword: (password: string) => void;
   onDemo: () => void;
   onClose: () => void;
   allowDemo: boolean;
 }) {
+  const [registering, setRegistering] = useState(false);
+  const [registrationCode, setRegistrationCode] = useState("");
+
   return <div className="modal-backdrop login-backdrop"><section className="login-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title">
     <a className="brand login-brand" href="#" onClick={(event) => event.preventDefault()}><BrandMark /><span className="brand-copy"><strong>JBR <span>Electrical</span></strong><small>STORE MANAGEMENT</small></span></a>
     <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">POWERING YOUR CATALOG</span></div>
-    <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">Welcome back<span className="heading-period">.</span></h1><p>Sign in with your JBR admin username and password.</p>
-      <form onSubmit={onSignIn}>
-        <label className="field-label" htmlFor="login-username">Username</label><input className="text-input" id="login-username" type="text" autoComplete="username" placeholder="Admin username" value={username} onChange={(event) => setUsername(event.target.value)} required />
-        <label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete="current-password" placeholder="Admin password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+    <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">{registering ? "Create your account" : <>Welcome back<span className="heading-period">.</span></>}</h1><p>{registering ? "Set up the first administrator account for this store." : "Sign in with your JBR admin email and password."}</p>
+      <form onSubmit={(event) => registering ? onRegister(event, registrationCode) : onSignIn(event)}>
+        <label className="field-label" htmlFor="login-email">Email</label><input className="text-input" id="login-email" type="email" autoComplete="email" placeholder="Admin email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+        <label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete={registering ? "new-password" : "current-password"} minLength={registering ? 12 : undefined} maxLength={256} placeholder={registering ? "At least 12 characters" : "Admin password"} value={password} onChange={(event) => setPassword(event.target.value)} required />
+        {registering && <>
+          <label className="field-label" htmlFor="registration-code">One-time setup code</label>
+          <input className="text-input" id="registration-code" type="password" autoComplete="off" placeholder="Provided by the API owner" value={registrationCode} onChange={(event) => setRegistrationCode(event.target.value)} required />
+        </>}
         {error && <div className="form-error login-error" role="alert">{error}</div>}
-        <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : "Sign in"} <span aria-hidden="true">→</span></button>
+        <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : registering ? "Create admin account" : "Sign in"} <span aria-hidden="true">→</span></button>
       </form>
+      <button className="signup-toggle" type="button" onClick={() => { setRegistering((current) => !current); setRegistrationCode(""); }}>
+        {registering ? <>Already registered? <strong>Sign in</strong></> : <>First time here? <strong>Register as administrator</strong></>}
+      </button>
       {allowDemo && <button className="demo-login" onClick={onDemo}>Explore with demo catalog <span aria-hidden="true">→</span></button>}
       <p className="login-security"><Icon name="lock" /> Your sign-in stays active on this device until you sign out.</p>
       {allowDemo && <button className="login-back-link" onClick={onClose}>Back to the demo catalog</button>}

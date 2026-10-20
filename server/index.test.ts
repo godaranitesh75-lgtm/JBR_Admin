@@ -68,7 +68,7 @@ const fakePool = {
   },
 };
 const app = createApplication(fakePool as never, secret, {
-  adminUsername: "test-admin",
+  adminUsername: "test-admin@example.com",
   adminPassword: "test-only-password",
   async sendOtp(phone) {
     sentOtpPhone = phone;
@@ -110,10 +110,10 @@ async function authenticate(): Promise<{ access_token: string; refresh_token: st
   return await response.json() as { access_token: string; refresh_token: string };
 }
 
-test("authenticates with configured username and password and issues revocable sessions", async () => {
+test("authenticates with configured email and password and issues revocable sessions", async () => {
   for (const credentials of [
     { username: "wrong-admin", password: "test-only-password" },
-    { username: "test-admin", password: "wrong-password" },
+    { email: "test-admin@example.com", password: "wrong-password" },
   ]) {
     const denied = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",
@@ -121,13 +121,13 @@ test("authenticates with configured username and password and issues revocable s
       body: JSON.stringify(credentials),
     });
     assert.equal(denied.status, 401);
-    assert.deepEqual(await denied.json(), { error: "The username or password is incorrect." });
+    assert.deepEqual(await denied.json(), { error: "The email/username or password is incorrect." });
   }
 
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "test-admin", password: "test-only-password" }),
+    body: JSON.stringify({ email: "test-admin@example.com", password: "test-only-password" }),
   });
   assert.equal(response.status, 200);
   const session = await response.json() as { access_token: string; refresh_token: string; user: { role: string } };
@@ -155,14 +155,14 @@ test("authenticates with configured username and password and issues revocable s
   const oldPasswordLogin = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "test-admin", password: "test-only-password" }),
+    body: JSON.stringify({ email: "test-admin@example.com", password: "test-only-password" }),
   });
   assert.equal(oldPasswordLogin.status, 401);
 
   const newPasswordLogin = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "test-admin", password: "new-test-password-2026" }),
+    body: JSON.stringify({ email: "test-admin@example.com", password: "new-test-password-2026" }),
   });
   assert.equal(newPasswordLogin.status, 200);
   const newSession = await newPasswordLogin.json() as { refresh_token: string };
@@ -228,12 +228,22 @@ test("protects admin inventory endpoints and rejects invalid products", async ()
   const unauthorized = await fetch(`${baseUrl}/api/admin/products`);
   assert.equal(unauthorized.status, 401);
 
-  const missingConfiguration = await fetch(`${publicBaseUrl}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "test", password: "test" }),
-  });
-  assert.equal(missingConfiguration.status, 503);
+  const unconfiguredApp = createApplication({
+    async query() { return { rows: [], rowCount: 0 }; },
+  } as never, secret, { allowPublicCatalogWrites: true });
+  const unconfiguredServer = unconfiguredApp.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => unconfiguredServer.once("listening", resolve));
+  const unconfiguredAddress = unconfiguredServer.address() as AddressInfo;
+  try {
+    const missingConfiguration = await fetch(`http://127.0.0.1:${unconfiguredAddress.port}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "test", password: "test" }),
+    });
+    assert.equal(missingConfiguration.status, 503);
+  } finally {
+    await new Promise<void>((resolve, reject) => unconfiguredServer.close((error) => error ? reject(error) : resolve()));
+  }
 
   const { access_token: token } = await authenticate();
   const invalid = await fetch(`${baseUrl}/api/admin/products`, {
@@ -335,4 +345,85 @@ test("allows the live JBR storefront origin to read the public product catalog",
   const response = await fetch(`${baseUrl}/api/products`, { headers: { Origin: origin } });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("access-control-allow-origin"), origin);
+});
+
+test("registers the first administrator once and allows that account to sign in", async () => {
+  const setupCode = "test-only-first-admin-registration-code-2026";
+  const database: { credential?: { username: string; password_hash: string } } = {};
+  const registrationPool = {
+    async query(sql: string, values: unknown[] = []) {
+      if (sql.startsWith("select username, password_hash from admin_credentials")) {
+        return { rows: database.credential ? [{ ...database.credential }] : [], rowCount: Number(Boolean(database.credential)) };
+      }
+      if (sql.startsWith("insert into admin_credentials")) {
+        if (database.credential) return { rows: [], rowCount: 0 };
+        database.credential = { username: String(values[0]), password_hash: String(values[1]) };
+        return { rows: [{ ...database.credential }], rowCount: 1 };
+      }
+      if (sql.startsWith("insert into admin_sessions")) return { rows: [], rowCount: 1 };
+      if (sql.includes("from products order by updated_at desc")) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const registrationApp = createApplication(registrationPool as never, secret, {
+    adminRegistrationCode: setupCode,
+    allowedPhones: ["+918209305040"],
+  });
+  const registrationServer = registrationApp.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => registrationServer.once("listening", resolve));
+  const address = registrationServer.address() as AddressInfo;
+  const registrationUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const invalidCode = await fetch(`${registrationUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "owner@example.com",
+        password: "new-admin-password-2026",
+        registration_code: "incorrect-setup-code",
+      }),
+    });
+    assert.equal(invalidCode.status, 403);
+    assert.equal(Boolean(database.credential), false);
+
+    const registration = await fetch(`${registrationUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "Owner@Example.com",
+        password: "new-admin-password-2026",
+        registration_code: setupCode,
+      }),
+    });
+    assert.equal(registration.status, 201);
+    const registeredSession = await registration.json() as { access_token: string; refresh_token: string };
+    assert.equal(database.credential?.username, "owner@example.com");
+
+    const duplicate = await fetch(`${registrationUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "other@example.com",
+        password: "another-admin-password-2026",
+        registration_code: setupCode,
+      }),
+    });
+    assert.equal(duplicate.status, 409);
+
+    const login = await fetch(`${registrationUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "OWNER@example.com", password: "new-admin-password-2026" }),
+    });
+    assert.equal(login.status, 200);
+    const session = await login.json() as { access_token: string };
+    const catalog = await fetch(`${registrationUrl}/api/admin/products`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    assert.equal(catalog.status, 200);
+    assert.ok(registeredSession.refresh_token);
+  } finally {
+    await new Promise<void>((resolve, reject) => registrationServer.close((error) => error ? reject(error) : resolve()));
+  }
 });
