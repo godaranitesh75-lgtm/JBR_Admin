@@ -111,6 +111,10 @@ async function authenticate(): Promise<{ access_token: string; refresh_token: st
 }
 
 test("authenticates with configured email and password and issues revocable sessions", async () => {
+  const authConfig = await fetch(`${baseUrl}/api/auth/config`);
+  assert.equal(authConfig.status, 200);
+  assert.deepEqual(await authConfig.json(), { email: "test-admin@example.com" });
+
   for (const credentials of [
     { username: "wrong-admin", password: "test-only-password" },
     { email: "test-admin@example.com", password: "wrong-password" },

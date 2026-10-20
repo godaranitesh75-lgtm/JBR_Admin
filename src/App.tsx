@@ -228,7 +228,7 @@ function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(settings);
   const [loginError, setLoginError] = useState("");
-  const [loginEmail, setLoginEmail] = useState("niteshgodara1845@gmail.com");
+  const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
 
   const notify = useCallback((message: string, error = false) => {
@@ -292,6 +292,15 @@ function App() {
     const savedSession = readSession();
     if (!savedSession?.access_token || !savedSession.user?.id) {
       setLoginRequired(true);
+      void fetch(`${apiBase(settings)}/api/auth/config`)
+        .then(readResponse<{ email: string }>)
+        .then((config) => {
+          if (typeof config.email !== "string") throw new Error("The server returned an invalid sign-in configuration.");
+          if (config.email) setLoginEmail((current) => current || config.email);
+        })
+        .catch((error: unknown) => {
+          setLoginError(error instanceof Error ? `Could not load the configured admin email: ${error.message}` : "Could not load the configured admin email.");
+        });
       return;
     }
     setSession(savedSession);
@@ -1118,7 +1127,7 @@ function SettingsView({ settings, setSettings, databaseConnected, localDemoOnly,
           ? <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Manage this device's catalog</strong><p>Products are stored locally on this device and remain separate from the live website catalog.</p></div></div><div className="guide-step"><span>02</span><div><strong>Export a backup</strong><p>Use Catalog backup to export JSON before clearing app data or changing devices.</p></div></div><div className="guide-step"><span>03</span><div><strong>Restore live service later</strong><p>Rebuild without VITE_LOCAL_DEMO_MODE after the protected production API is ready.</p></div></div></div>
           : publicCatalogWrites
             ? <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the API opt-in</strong><p>Set ENABLE_PUBLIC_CATALOG_WRITES=true on the API host and deploy. Keep the API rate limit enabled.</p></div></div><div className="guide-step"><span>02</span><div><strong>Connect to the shared database</strong><p>Use the API that serves the website, with its existing database configuration. The APK never connects directly to PostgreSQL.</p></div></div><div className="guide-step"><span>03</span><div><strong>Accept the public access risk</strong><p>No login is required: anyone who can reach the API may update or delete products in the live catalog.</p></div></div></div>
-            : <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the protected backend</strong><p>Deploy the API to the same database used by the website and configure ADMIN_USERNAME and ADMIN_PASSWORD in the host's private environment settings.</p></div></div><div className="guide-step"><span>02</span><div><strong>Sign in with your admin credentials</strong><p>The API checks the credentials and issues a short-lived session. The password is not saved on the device or included in the APK.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here, or bake them into a shared APK build to enable new image uploads.</p></div></div></div>}
+            : <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the protected backend</strong><p>Deploy the API to the same database used by the website and configure ADMIN_EMAIL and ADMIN_PASSWORD in the host's private environment settings.</p></div></div><div className="guide-step"><span>02</span><div><strong>Sign in with your admin credentials</strong><p>The API supplies the configured email to prefill sign-in, checks your password, and issues a short-lived session. The password is not saved on the device or included in the APK.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here, or bake them into a shared APK build to enable new image uploads.</p></div></div></div>}
         <div className="guide-footer"><Icon name="lock" /> Database credentials and signing secrets stay on the backend, never in the APK.</div>
       </section>
       <section className="panel data-tools-card"><div><h2>Catalog backup</h2><p>Export or restore your product data as a JSON file.</p></div><div className="data-tools-actions"><button className="button button-secondary" onClick={exportJson}><Icon name="download" /> Export backup</button><label className="button button-secondary import-button"><Icon name="upload" /> Import backup<input type="file" accept="application/json,.json" hidden onChange={importCatalog} /></label></div></section>
@@ -1268,7 +1277,7 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
     <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">POWERING YOUR CATALOG</span></div>
     <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">{registering ? "Create your account" : <>Welcome back<span className="heading-period">.</span></>}</h1><p>{registering ? "Set up the first administrator account for this store." : "Sign in with your JBR admin email and password."}</p>
       <form onSubmit={(event) => registering ? onRegister(event, registrationCode) : onSignIn(event)}>
-        <label className="field-label" htmlFor="login-email">Email</label><input className="text-input" id="login-email" type="email" autoComplete="email" placeholder="Admin email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+        <label className="field-label" htmlFor="login-email">Email</label><input className="text-input" id="login-email" type="email" autoComplete="email" placeholder="Configured admin email" value={email} onChange={(event) => setEmail(event.target.value)} required />
         <label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete={registering ? "new-password" : "current-password"} minLength={registering ? 12 : undefined} maxLength={256} placeholder={registering ? "At least 12 characters" : "Admin password"} value={password} onChange={(event) => setPassword(event.target.value)} required />
         {registering && <>
           <label className="field-label" htmlFor="registration-code">One-time setup code</label>

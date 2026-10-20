@@ -343,6 +343,10 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json({ status: "ok", database: "connected" });
   }));
 
+  app.get("/api/auth/config", (_req, res) => {
+    res.json({ email: adminUsername ?? "" });
+  });
+
   app.post("/api/auth/register", rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 5,
