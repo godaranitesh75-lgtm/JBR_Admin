@@ -4,7 +4,7 @@ This React + TypeScript Capacitor app manages products through the same API/data
 
 ## Production API and password sign-in setup
 
-The APK signs in to the website API with an administrator email and password. The API source in `server/index.ts` accepts either email or username as the login identifier and implements protected catalog routes. Deploy it to the **same API/database used by the website** so authenticated app edits appear on the main website.
+The APK signs in to the website API with an administrator email or username and password. The API source in `server/index.ts` accepts either email or username as the login identifier and implements protected catalog routes. The sign-in screen uses the registered database username when one exists and only offers registration when the API confirms that first-admin signup is available. Deploy it to the **same API/database used by the website** so authenticated app edits appear on the main website.
 
 Configure these private server environment variables:
 

@@ -343,9 +343,16 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json({ status: "ok", database: "connected" });
   }));
 
-  app.get("/api/auth/config", (_req, res) => {
-    res.json({ email: adminUsername ?? "" });
-  });
+  app.get("/api/auth/config", asyncRoute(async (_req, res) => {
+    const existing = await pool.query<{ username: string }>(
+      "select username from admin_credentials where id = 1",
+    );
+    const registeredUsername = existing.rows[0]?.username;
+    res.json({
+      email: registeredUsername ?? adminUsername ?? "",
+      registration_available: !registeredUsername && Boolean(adminRegistrationCode),
+    });
+  }));
 
   app.post("/api/auth/register", rateLimit({
     windowMs: 15 * 60 * 1000,

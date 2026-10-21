@@ -217,6 +217,7 @@ function App() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [remoteAdmin, setRemoteAdmin] = useState(false);
   const [loginRequired, setLoginRequired] = useState(false);
+  const [registrationAvailable, setRegistrationAvailable] = useState(false);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [storeSearch, setStoreSearch] = useState("");
@@ -270,6 +271,7 @@ function App() {
     if (!configured) {
       setMode("demo");
       setLoginRequired(false);
+      setRegistrationAvailable(false);
       return;
     }
     setMode("remote");
@@ -293,10 +295,13 @@ function App() {
     if (!savedSession?.access_token || !savedSession.user?.id) {
       setLoginRequired(true);
       void fetch(`${apiBase(settings)}/api/auth/config`)
-        .then(readResponse<{ email: string }>)
+        .then(readResponse<{ email: string; registration_available: boolean }>)
         .then((config) => {
-          if (typeof config.email !== "string") throw new Error("The server returned an invalid sign-in configuration.");
+          if (typeof config.email !== "string") {
+            throw new Error("The server returned an invalid sign-in configuration.");
+          }
           if (config.email) setLoginEmail((current) => current || config.email);
+          setRegistrationAvailable(config.registration_available === true);
         })
         .catch((error: unknown) => {
           setLoginError(error instanceof Error ? `Could not load the configured admin email: ${error.message}` : "Could not load the configured admin email.");
@@ -589,6 +594,7 @@ function App() {
     setRemoteAdmin(true);
     setMode("remote");
     setLoginRequired(false);
+    setRegistrationAvailable(false);
     setLoginPassword("");
     notify("Welcome to your JBR Electrical admin workspace.");
   };
@@ -835,6 +841,7 @@ function App() {
       {loginRequired && <LoginDialog
         onSignIn={signIn} onRegister={registerAdmin} loading={loading} error={loginError}
         email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} onDemo={useDemoMode}
+        registrationAvailable={registrationAvailable}
         allowDemo={!BUILD_SETTINGS.apiUrl}
         onClose={() => { setLoginRequired(false); setMode("demo"); }}
       />}
@@ -1256,7 +1263,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
   </div>;
 }
 
-function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, password, setPassword, onDemo, onClose, allowDemo }: {
+function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, password, setPassword, onDemo, onClose, allowDemo, registrationAvailable }: {
   onSignIn: (event: FormEvent<HTMLFormElement>) => void;
   onRegister: (event: FormEvent<HTMLFormElement>, registrationCode: string) => void;
   loading: boolean;
@@ -1268,6 +1275,7 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
   onDemo: () => void;
   onClose: () => void;
   allowDemo: boolean;
+  registrationAvailable: boolean;
 }) {
   const [registering, setRegistering] = useState(false);
   const [registrationCode, setRegistrationCode] = useState("");
@@ -1277,7 +1285,7 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
     <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">POWERING YOUR CATALOG</span></div>
     <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">{registering ? "Create your account" : <>Welcome back<span className="heading-period">.</span></>}</h1><p>{registering ? "Set up the first administrator account for this store." : "Sign in with your JBR admin email and password."}</p>
       <form onSubmit={(event) => registering ? onRegister(event, registrationCode) : onSignIn(event)}>
-        <label className="field-label" htmlFor="login-email">Email</label><input className="text-input" id="login-email" type="email" autoComplete="email" placeholder="Configured admin email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+        <label className="field-label" htmlFor="login-email">Email or username</label><input className="text-input" id="login-email" type="text" inputMode="email" autoCapitalize="none" autoComplete="username" placeholder="Configured admin email or username" value={email} onChange={(event) => setEmail(event.target.value)} required />
         <label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete={registering ? "new-password" : "current-password"} minLength={registering ? 12 : undefined} maxLength={256} placeholder={registering ? "At least 12 characters" : "Admin password"} value={password} onChange={(event) => setPassword(event.target.value)} required />
         {registering && <>
           <label className="field-label" htmlFor="registration-code">One-time setup code</label>
@@ -1286,9 +1294,9 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
         {error && <div className="form-error login-error" role="alert">{error}</div>}
         <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : registering ? "Create admin account" : "Sign in"} <span aria-hidden="true">→</span></button>
       </form>
-      <button className="signup-toggle" type="button" onClick={() => { setRegistering((current) => !current); setRegistrationCode(""); }}>
+      {registrationAvailable && <button className="signup-toggle" type="button" onClick={() => { setRegistering((current) => !current); setRegistrationCode(""); }}>
         {registering ? <>Already registered? <strong>Sign in</strong></> : <>First time here? <strong>Register as administrator</strong></>}
-      </button>
+      </button>}
       {allowDemo && <button className="demo-login" onClick={onDemo}>Explore with demo catalog <span aria-hidden="true">→</span></button>}
       <p className="login-security"><Icon name="lock" /> Your sign-in stays active on this device until you sign out.</p>
       {allowDemo && <button className="login-back-link" onClick={onClose}>Back to the demo catalog</button>}
