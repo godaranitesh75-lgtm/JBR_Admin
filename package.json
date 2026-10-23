@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "dev:api": "tsx watch server/index.ts",
     "build:server": "tsc -p tsconfig.server.json",
+    "build:web": "tsc -p tsconfig.app.json --noEmit && vite build",
     "build": "tsc -b && vite build && npm run build:server",
     "test:api": "tsx --test server/index.test.ts",
     "start": "node server-dist/index.js",
