@@ -25,13 +25,12 @@ The website build is written to `dist`. Vercel is configured in `vercel.json` to
 - `VITE_PUBLIC_CATALOG_WRITES=false`: requires administrator sign-in for catalog changes.
 - `VITE_CLOUDINARY_CLOUD_NAME` and `VITE_CLOUDINARY_UPLOAD_PRESET`: optional; required for new image uploads.
 
-Production builds fail if the live HTTPS API URL is missing, local demo mode is enabled, or public catalog writes are enabled. The API must use the same production database as the storefront. Add the deployed website's exact origin (including `https://`) to the API host's `CORS_ORIGINS` environment variable if it is not already allowed, then redeploy the API. Use the hosting provider's generated HTTPS domain or a custom domain for the production site.
-
+Production builds fail if the live HTTPS API URL is missing, local demo mode is enabled, or public catalog writes are enabled. The API must use the same production database as the storefront. Add each deployed frontend origin (including `https://`) to the API host's `CORS_ORIGINS` environment variable if it is not already allowed, then redeploy the API. This includes the storefront and any separate admin frontend deployed on a different domain, such as `https://jbr-electrical.vercel.app` and `https://jbr-admin.vercel.app`. Use the hosting provider's generated HTTPS domain or a custom domain for the production site.
 For local-only testing without a deployed API, set `VITE_LOCAL_DEMO_MODE=true` in a local `.env.local` file before starting Vite. Demo catalog changes are stored only in that browser and do not sync to the live store. Never put database credentials, administrator passwords, JWT secrets, or Cloudinary API secrets in Vite environment variables.
 
 ## Production API and password sign-in setup
 
-The website signs in to the API with an administrator email or username and password. The API source in `server/index.ts` accepts either email or username as the login identifier and implements protected catalog routes. The sign-in screen uses the registered database username when one exists and only offers registration when the API confirms that first-admin signup is available. Deploy it to the **same API/database used by the website** so authenticated edits appear on the main storefront.
+The website signs in to the API with an administrator email or username and password. The API source in `backend/index.ts` accepts either email or username as the login identifier and implements protected catalog routes. The sign-in screen uses the registered database username when one exists and only offers registration when the API confirms that first-admin signup is available. Deploy it to the **same API/database used by the website** so authenticated edits appear on the main storefront.
 
 Configure these private server environment variables:
 

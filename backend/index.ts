@@ -99,6 +99,7 @@ const defaultOrigins = [
   "http://127.0.0.1:5173",
   "http://localhost:4173",
   "https://jbr-electrical.vercel.app",
+  "https://jbr-admin.vercel.app",
   "capacitor://localhost",
   "http://localhost",
   "https://localhost",
