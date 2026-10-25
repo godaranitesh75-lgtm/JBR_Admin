@@ -39,6 +39,7 @@ const STORAGE_KEYS = {
   catalog: "jbr-admin-products-v1",
   settings: "jbr-admin-settings-v1",
   session: "jbr-admin-session-v1",
+  demoUsers: "jbr-demo-users-v1",
 } as const;
 
 const LOCAL_DEMO_MODE = import.meta.env.VITE_LOCAL_DEMO_MODE === "true";
