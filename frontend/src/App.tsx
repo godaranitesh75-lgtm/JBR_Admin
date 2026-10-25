@@ -270,8 +270,8 @@ function App() {
     const configured = !LOCAL_DEMO_MODE && Boolean(settings.apiUrl);
     if (!configured) {
       setMode("demo");
-      setLoginRequired(false);
-      setRegistrationAvailable(false);
+      setLoginRequired(true);
+      setRegistrationAvailable(true);
       return;
     }
     setMode("remote");
@@ -604,6 +604,19 @@ function App() {
     setLoginError("");
     setLoading(true);
     try {
+      if (!remoteConfigured) {
+        const users = readStorage<Array<{ email: string; passwordHash: string; name: string }>>(STORAGE_KEYS.demoUsers, []);
+        const normalizedEmail = loginEmail.trim().toLowerCase();
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(loginPassword));
+        const passwordHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+        const user = users.find((item) => item.email === normalizedEmail && item.passwordHash === passwordHash);
+        if (!user) throw new Error("Email or password is incorrect. Create an account first.");
+        const localSession: AuthSession = { access_token: `local-${crypto.randomUUID()}`, refresh_token: `local-${crypto.randomUUID()}`, user: { id: normalizedEmail, role: "ADMIN" } };
+        localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(localSession));
+        setSession(localSession); setRemoteAdmin(false); setMode("demo"); setLoginRequired(false); setLoginPassword("");
+        notify(`Welcome back, ${user.name || user.email}! Demo workspace opened.`);
+        return;
+      }
       const response = await fetch(`${apiBase(settings)}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -622,6 +635,22 @@ function App() {
     setLoginError("");
     setLoading(true);
     try {
+      if (!remoteConfigured) {
+        const users = readStorage<Array<{ email: string; passwordHash: string; name: string }>>(STORAGE_KEYS.demoUsers, []);
+        const normalizedEmail = loginEmail.trim().toLowerCase();
+        if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(normalizedEmail)) throw new Error("Enter a valid email address.");
+        if (loginPassword.length < 8) throw new Error("Use a password with at least 8 characters.");
+        if (users.some((item) => item.email === normalizedEmail)) throw new Error("An account with this email already exists. Please sign in.");
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(loginPassword));
+        const passwordHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+        const name = normalizedEmail.split("@")[0];
+        localStorage.setItem(STORAGE_KEYS.demoUsers, JSON.stringify([...users, { email: normalizedEmail, passwordHash, name }]));
+        const localSession: AuthSession = { access_token: `local-${crypto.randomUUID()}`, refresh_token: `local-${crypto.randomUUID()}`, user: { id: normalizedEmail, role: "ADMIN" } };
+        localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(localSession));
+        setSession(localSession); setRemoteAdmin(false); setMode("demo"); setLoginRequired(false); setLoginPassword("");
+        notify("Account created! You’re now inside the JBR demo workspace.");
+        return;
+      }
       const response = await fetch(`${apiBase(settings)}/api/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
