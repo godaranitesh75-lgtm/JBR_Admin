@@ -270,7 +270,9 @@ function App() {
     const configured = !LOCAL_DEMO_MODE && Boolean(settings.apiUrl);
     if (!configured) {
       setMode("demo");
-      setLoginRequired(true);
+      const localSession = readSession();
+      setSession(localSession);
+      setLoginRequired(!localSession?.access_token || !localSession.user?.id);
       setRegistrationAvailable(true);
       return;
     }
@@ -684,7 +686,7 @@ function App() {
     setRemoteAdmin(false);
     setLoginRequired(remoteConfigured);
     setLoginError("");
-    if (!remoteConfigured) setMode("demo");
+    if (!remoteConfigured) { setMode("demo"); setLoginRequired(true); }
     if (auth?.refresh_token) {
       try {
         const response = await fetch(`${apiBase(settings)}/api/auth/logout`, {
@@ -871,7 +873,7 @@ function App() {
         onSignIn={signIn} onRegister={registerAdmin} loading={loading} error={loginError}
         email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} onDemo={useDemoMode}
         registrationAvailable={registrationAvailable}
-        allowDemo={!BUILD_SETTINGS.apiUrl}
+        allowDemo={false}
         onClose={() => { setLoginRequired(false); setMode("demo"); }}
       />}
       {loading && <div className="busy-indicator" role="status" aria-live="polite"><span className="spinner" /> Working…</div>}
