@@ -26,8 +26,13 @@ export default defineConfig(({ command, mode }) => {
   }
 
   return {
+    root: "frontend",
     base: "/",
     plugins: [react()],
-    build: { target: "es2022" },
+    build: {
+      target: "es2022",
+      outDir: "../dist",
+      emptyOutDir: true,
+    },
   };
 });
