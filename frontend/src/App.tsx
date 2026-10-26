@@ -1263,7 +1263,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
   </div>;
 }
 
-function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, password, setPassword, onDemo, onClose, allowDemo, registrationAvailable }: {
+function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, password, setPassword, onDemo, onClose, allowDemo, registrationAvailable: _registrationAvailable }: {
   onSignIn: (event: FormEvent<HTMLFormElement>) => void;
   onRegister: (event: FormEvent<HTMLFormElement>, registrationCode: string) => void;
   loading: boolean;
@@ -1289,14 +1289,14 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
         <label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete={registering ? "new-password" : "current-password"} minLength={registering ? 12 : undefined} maxLength={256} placeholder={registering ? "At least 12 characters" : "Admin password"} value={password} onChange={(event) => setPassword(event.target.value)} required />
         {registering && <>
           <label className="field-label" htmlFor="registration-code">One-time setup code</label>
-          <input className="text-input" id="registration-code" type="password" autoComplete="off" placeholder="Provided by the API owner" value={registrationCode} onChange={(event) => setRegistrationCode(event.target.value)} required />
+          <input className="text-input" id="registration-code" type="password" autoComplete="off" placeholder="ADMIN_REGISTRATION_CODE from server environment" value={registrationCode} onChange={(event) => setRegistrationCode(event.target.value)} required />
         </>}
         {error && <div className="form-error login-error" role="alert">{error}</div>}
         <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : registering ? "Create admin account" : "Sign in"} <span aria-hidden="true">→</span></button>
       </form>
-      {registrationAvailable && <button className="signup-toggle" type="button" onClick={() => { setRegistering((current) => !current); setRegistrationCode(""); }}>
+      <button className="signup-toggle" type="button" onClick={() => { setRegistering((current) => !current); setRegistrationCode(""); }}>
         {registering ? <>Already registered? <strong>Sign in</strong></> : <>First time here? <strong>Register as administrator</strong></>}
-      </button>}
+      </button>
       {allowDemo && <button className="demo-login" onClick={onDemo}>Explore with demo catalog <span aria-hidden="true">→</span></button>}
       <p className="login-security"><Icon name="lock" /> Your sign-in stays active on this device until you sign out.</p>
       {allowDemo && <button className="login-back-link" onClick={onClose}>Back to the demo catalog</button>}

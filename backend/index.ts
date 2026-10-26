@@ -278,6 +278,43 @@ function invalidId(req: Request, res: Response): boolean {
   return true;
 }
 
+async function ensureTables(pool: Pool): Promise<void> {
+  try {
+    await pool.query(`
+      create table if not exists public.products (
+        id uuid primary key default gen_random_uuid(),
+        name text not null check (length(trim(name)) between 1 and 120),
+        sku text not null default '',
+        category text not null check (length(trim(category)) between 1 and 60),
+        description text not null default '',
+        price numeric(12, 2) not null default 0 check (price between 0 and 9999999999),
+        stock integer not null default 0 check (stock between 0 and 1000000000),
+        image_url text not null default '',
+        active boolean not null default true,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      );
+
+      create table if not exists public.admin_sessions (
+        id uuid primary key,
+        phone text not null,
+        refresh_token_hash text not null unique,
+        created_at timestamptz not null default now(),
+        revoked_at timestamptz
+      );
+
+      create table if not exists public.admin_credentials (
+        id integer primary key check (id = 1),
+        username text not null,
+        password_hash text not null,
+        updated_at timestamptz not null default now()
+      );
+    `);
+  } catch (error) {
+    console.error("Could not auto-create database tables:", error);
+  }
+}
+
 export function createApplication(pool: Pool, secret: string, options: AuthOptions = {}) {
   const allowedPhones = new Set(options.allowedPhones ?? configuredAllowedPhones);
   const adminUsername = options.adminUsername ?? configuredAdminUsername;
@@ -341,10 +378,13 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
 
   app.get("/api/health", asyncRoute(async (_req, res) => {
     await pool.query("select 1");
+    await ensureTables(pool);
     res.json({ status: "ok", database: "connected" });
   }));
 
   app.get("/api/auth/config", asyncRoute(async (_req, res) => {
+    try {
+      await ensureTables(pool);
     const existing = await pool.query<{ username: string }>(
       "select username from admin_credentials where id = 1",
     );
@@ -352,6 +392,16 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json({
       email: registeredUsername ?? adminUsername ?? "",
       registration_available: !registeredUsername && Boolean(adminRegistrationCode),
+    });
+    return;
+  } catch {
+    res.json({
+      email: adminUsername ?? "",
+      registration_available: Boolean(adminRegistrationCode),
+    });
+    return;
+  }
+  void ({
     });
   }));
 
@@ -769,6 +819,7 @@ async function start(): Promise<void> {
 
   try {
     await pool.query("select 1");
+    await ensureTables(pool);
     const app = createApplication(pool, jwtSecret!);
     const port = Number(process.env.PORT ?? 3000);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be a valid TCP port number.");
