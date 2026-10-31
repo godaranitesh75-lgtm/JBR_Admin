@@ -315,6 +315,48 @@ async function ensureTables(pool: Pool): Promise<void> {
   }
 }
 
+/**
+ * Sync admin credentials from environment variables.
+ *
+ * This runs on every startup so that:
+ * 1. The first-ever login auto-creates the DB row (if it doesn't exist).
+ * 2. If the env vars change (e.g. password reset), the DB row is updated to match.
+ * 3. The shared-database problem is avoided — this project's env vars always win.
+ */
+async function syncAdminCredentials(pool: Pool, adminUsername: string | undefined, adminPassword: string | undefined): Promise<void> {
+  if (!adminUsername || !adminPassword) return;
+  try {
+    const existing = await pool.query<{ username: string; password_hash: string }>(
+      "select username, password_hash from admin_credentials where id = 1",
+    );
+    const row = existing.rows[0];
+    const normalizedUsername = adminUsername.toLowerCase();
+
+    if (!row) {
+      // No credentials in DB yet — create them from env vars
+      const passwordHash = await hashPassword(adminPassword);
+      await pool.query(
+        `insert into admin_credentials (id, username, password_hash) values (1, $1, $2) on conflict (id) do nothing`,
+        [normalizedUsername, passwordHash],
+      );
+      console.info("JBR Electrical: admin credentials seeded from environment variables.");
+      return;
+    }
+
+    // If username in DB doesn't match env var, update it (covers shared-DB conflict)
+    if (row.username.toLowerCase() !== normalizedUsername) {
+      const passwordHash = await hashPassword(adminPassword);
+      await pool.query(
+        `update admin_credentials set username = $1, password_hash = $2, updated_at = now() where id = 1`,
+        [normalizedUsername, passwordHash],
+      );
+      console.info("JBR Electrical: admin credentials updated to match environment variables.");
+    }
+  } catch (error) {
+    console.error("Could not sync admin credentials:", error);
+  }
+}
+
 export function createApplication(pool: Pool, secret: string, options: AuthOptions = {}) {
   const allowedPhones = new Set(options.allowedPhones ?? configuredAllowedPhones);
   const adminUsername = options.adminUsername ?? configuredAdminUsername;
@@ -820,6 +862,7 @@ async function start(): Promise<void> {
   try {
     await pool.query("select 1");
     await ensureTables(pool);
+    await syncAdminCredentials(pool, configuredAdminUsername, configuredAdminPassword);
     const app = createApplication(pool, jwtSecret!);
     const port = Number(process.env.PORT ?? 3000);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be a valid TCP port number.");

@@ -671,23 +671,13 @@ function App() {
     }
   };
 
-  const useDemoMode = () => {
-    setSession(null);
-    setRemoteAdmin(false);
-    setMode("demo");
-    setLoginRequired(false);
-    setLoginError("");
-    notify("You’re exploring the demo catalog. Connect the JBR store API to manage the live catalog.");
-  };
-
   const signOut = async () => {
     const auth = session;
     localStorage.removeItem(STORAGE_KEYS.session);
     setSession(null);
     setRemoteAdmin(false);
-    setLoginRequired(remoteConfigured);
+    setLoginRequired(true);
     setLoginError("");
-    if (!remoteConfigured) { setMode("demo"); setLoginRequired(true); }
     if (auth?.refresh_token) {
       try {
         const response = await fetch(`${apiBase(settings)}/api/auth/logout`, {
@@ -829,8 +819,8 @@ function App() {
         <div className="nav-caption nav-caption-lower">PREFERENCES</div>
         <nav className="main-nav"><NavButton name="settings" current={view} icon="settings" label="Settings & setup" onSelect={changeView} /></nav>
         <div className="sidebar-bottom">
-          <div className="help-card"><div className="help-icon"><Icon name="spark" /></div><strong>Your shop, in sync.</strong><p>Manage your catalog and keep your website up to date.</p><button className="text-button" onClick={() => changeView("settings")}>View setup guide <span aria-hidden="true">→</span></button></div>
-          <div className="user-row"><span className="user-avatar">J</span><span className="user-copy"><strong>JBR Electrical</strong><small>{mode === "demo" ? "Demo workspace" : session?.user.phone ?? "Live database"}</small></span>{session && <button className="icon-button sign-out-button" onClick={signOut} aria-label="Sign out" title="Sign out"><Icon name="logout" /></button>}</div>
+          <div className="help-card"><div className="help-icon"><Icon name="shop" /></div><strong>Customer storefront</strong><p>View the live shopping page that customers see.</p><a className="text-button" href="/" target="_blank" rel="noreferrer">View storefront <span aria-hidden="true">↗</span></a></div>
+          <div className="user-row"><span className="user-avatar">J</span><span className="user-copy"><strong>JBR Electrical</strong><small>{session?.user.id ?? "Admin"}</small></span>{session && <button className="icon-button sign-out-button" onClick={signOut} aria-label="Sign out" title="Sign out"><Icon name="logout" /></button>}</div>
         </div>
       </aside>
 
@@ -872,10 +862,8 @@ function App() {
       />}
       {loginRequired && <LoginDialog
         onSignIn={signIn} onRegister={registerAdmin} loading={loading} error={loginError}
-        email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword} onDemo={useDemoMode}
+        email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword}
         registrationAvailable={registrationAvailable}
-        allowDemo={false}
-        onClose={() => { setLoginRequired(false); setMode("demo"); }}
       />}
       {loading && <div className="busy-indicator" role="status" aria-live="polite"><span className="spinner" /> Working…</div>}
       <div className="toast-region" aria-live="polite" aria-atomic="false">
@@ -1295,7 +1283,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
   </div>;
 }
 
-function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, password, setPassword, onDemo, onClose, allowDemo, registrationAvailable: _registrationAvailable }: {
+function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, password, setPassword, registrationAvailable }: {
   onSignIn: (event: FormEvent<HTMLFormElement>) => void;
   onRegister: (event: FormEvent<HTMLFormElement>, registrationCode: string) => void;
   loading: boolean;
@@ -1304,21 +1292,23 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
   setEmail: (email: string) => void;
   password: string;
   setPassword: (password: string) => void;
-  onDemo: () => void;
-  onClose: () => void;
-  allowDemo: boolean;
   registrationAvailable: boolean;
 }) {
   const [registering, setRegistering] = useState(false);
   const [registrationCode, setRegistrationCode] = useState("");
 
   return <div className="modal-backdrop login-backdrop"><section className="login-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title">
-    <a className="brand login-brand" href="#" onClick={(event) => event.preventDefault()}><BrandMark /><span className="brand-copy"><strong>JBR <span>Electrical</span></strong><small>STORE MANAGEMENT</small></span></a>
-    <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">POWERING YOUR CATALOG</span></div>
-    <div className="login-content"><span className="dialog-eyebrow">ADMIN WORKSPACE</span><h1 id="login-title">{registering ? "Create your account" : <>Welcome back<span className="heading-period">.</span></>}</h1><p>{registering ? "Set up the first administrator account for this store." : "Sign in with your JBR admin email and password."}</p>
+    <a className="brand login-brand" href="/" aria-label="Back to storefront"><BrandMark /><span className="brand-copy"><strong>JBR <span>Electrical</span></strong><small>ADMIN PANEL</small></span></a>
+    <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">STORE MANAGEMENT</span></div>
+    <div className="login-content">
+      <span className="dialog-eyebrow">ADMIN ACCESS</span>
+      <h1 id="login-title">{registering ? "Create admin account" : <>Welcome back<span className="heading-period">.</span></>}</h1>
+      <p>{registering ? "Set up the first administrator account using the one-time setup code." : "Enter your admin email and password to access the store management panel."}</p>
       <form onSubmit={(event) => registering ? onRegister(event, registrationCode) : onSignIn(event)}>
-        <label className="field-label" htmlFor="login-email">Email or username</label><input className="text-input" id="login-email" type="text" inputMode="email" autoCapitalize="none" autoComplete="username" placeholder="Configured admin email or username" value={email} onChange={(event) => setEmail(event.target.value)} required />
-        <label className="field-label" htmlFor="login-password">Password</label><input className="text-input" id="login-password" type="password" autoComplete={registering ? "new-password" : "current-password"} minLength={registering ? 12 : undefined} maxLength={256} placeholder={registering ? "At least 12 characters" : "Admin password"} value={password} onChange={(event) => setPassword(event.target.value)} required />
+        <label className="field-label" htmlFor="login-email">Email</label>
+        <input className="text-input" id="login-email" type="email" inputMode="email" autoCapitalize="none" autoComplete="username" placeholder="Admin email address" value={email} onChange={(event) => setEmail(event.target.value)} required />
+        <label className="field-label" htmlFor="login-password">Password</label>
+        <input className="text-input" id="login-password" type="password" autoComplete={registering ? "new-password" : "current-password"} minLength={registering ? 12 : undefined} maxLength={256} placeholder={registering ? "At least 12 characters" : "Admin password"} value={password} onChange={(event) => setPassword(event.target.value)} required />
         {registering && <>
           <label className="field-label" htmlFor="registration-code">One-time setup code</label>
           <input className="text-input" id="registration-code" type="password" autoComplete="off" placeholder="ADMIN_REGISTRATION_CODE from server environment" value={registrationCode} onChange={(event) => setRegistrationCode(event.target.value)} required />
@@ -1326,12 +1316,11 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
         {error && <div className="form-error login-error" role="alert">{error}</div>}
         <button className="button button-primary login-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : registering ? "Create admin account" : "Sign in"} <span aria-hidden="true">→</span></button>
       </form>
-      <button className="signup-toggle" type="button" onClick={() => { setRegistering((current) => !current); setRegistrationCode(""); }}>
-        {registering ? <>Already registered? <strong>Sign in</strong></> : <>First time here? <strong>Register as administrator</strong></>}
-      </button>
-      {allowDemo && <button className="demo-login" onClick={onDemo}>Explore with demo catalog <span aria-hidden="true">→</span></button>}
+      {registrationAvailable && <button className="signup-toggle" type="button" onClick={() => { setRegistering((current) => !current); setRegistrationCode(""); }}>
+        {registering ? <>Already registered? <strong>Sign in</strong></> : <>First time? <strong>Register as administrator</strong></>}
+      </button>}
       <p className="login-security"><Icon name="lock" /> Your sign-in stays active on this device until you sign out.</p>
-      {allowDemo && <button className="login-back-link" onClick={onClose}>Back to the demo catalog</button>}
+      <a className="login-back-link" href="/">← Back to storefront</a>
     </div>
   </section></div>;
 }

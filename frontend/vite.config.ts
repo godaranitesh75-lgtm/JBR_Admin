@@ -5,16 +5,10 @@ export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
 
   if (command === "build" && mode === "production") {
-    const demoMode = env.VITE_LOCAL_DEMO_MODE === "true";
-    const explicitlyAllowDemoBuild = env.VITE_ALLOW_PRODUCTION_DEMO === "true";
-
-    if (demoMode && !explicitlyAllowDemoBuild) {
-      throw new Error("For an intentional demo deployment, set VITE_ALLOW_PRODUCTION_DEMO=true.");
-    }
     if (env.VITE_PUBLIC_CATALOG_WRITES === "true") {
-      throw new Error("Demo builds must keep public catalog writes disabled.");
+      throw new Error("Production builds must keep public catalog writes disabled.");
     }
-    if (!demoMode) {
+    if (env.VITE_LOCAL_DEMO_MODE !== "true") {
       try {
         if (new URL(env.VITE_PUBLIC_API_URL).protocol !== "https:") {
           throw new Error();
@@ -33,6 +27,15 @@ export default defineConfig(({ command, mode }) => {
       target: "es2022",
       outDir: "../dist",
       emptyOutDir: true,
+    },
+    server: {
+      // In dev, proxy /api calls to the backend
+      proxy: {
+        "/api": {
+          target: env.VITE_PUBLIC_API_URL || "http://localhost:3000",
+          changeOrigin: true,
+        },
+      },
     },
   };
 });
