@@ -83,8 +83,14 @@ const productSchema = z.object({
   stock: z.coerce.number().int().min(0).max(1_000_000_000),
   image_data: z.string().max(5_000_000).default("").refine((value) => {
     if (!value) return true;
-    return value.startsWith("data:image/");
-  }, "Product images must be base64 data URLs starting with data:image/."),
+    if (value.startsWith("data:image/")) return true;
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" || url.protocol === "http:";
+    } catch {
+      return false;
+    }
+  }, "Product images must be a base64 data URL or an HTTPS image URL."),
   active: z.boolean().default(true),
 }).strict();
 
