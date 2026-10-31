@@ -1,13 +1,8 @@
-# JBR Electrical - Setup Guide
+# JBR Electrical Admin - Setup Guide
 
-## Quick Start
+## Overview
 
-This project has **two separate applications**:
-
-1. **Customer Storefront** (`/`) - Shopping page with customer authentication
-2. **Admin Panel** (`/admin`) - Product management with admin authentication
-
-**IMPORTANT:** All users (customers and admins) must login with email/password to access the site.
+This is an **admin-only product management system** for JBR Electrical. There is no customer storefront - this application is solely for managing products, inventory, and generating reports.
 
 ---
 
@@ -28,8 +23,6 @@ Or run it manually in the Neon SQL Editor:
 ALTER TABLE products RENAME COLUMN image_url TO image_data;
 ```
 
-**Note:** The backend will automatically create the new `customer_credentials` and `customer_sessions` tables on startup.
-
 ### 2. Backend environment variables
 
 Your `.env` is already configured:
@@ -42,7 +35,7 @@ JWT_SECRET=jbr_electrical_secret_key_2024_secure_production_key
 PORT=3000
 ```
 
-**Important:** The backend now **auto-syncs admin credentials** on startup. Even if another project wrote to `admin_credentials`, your env vars will overwrite them on each restart. This solves the shared-database conflict.
+**Important:** The backend **auto-syncs credentials** on startup. Even if another project wrote to `admin_credentials`, your env vars will overwrite them on each restart. This solves the shared-database conflict.
 
 ### 3. Frontend environment variables
 
@@ -50,8 +43,6 @@ PORT=3000
 
 ```env
 VITE_PUBLIC_API_URL=https://jbrelec.onrender.com
-VITE_LOCAL_DEMO_MODE=false
-VITE_PUBLIC_CATALOG_WRITES=false
 ```
 
 ---
@@ -72,30 +63,21 @@ data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD...
 
 ### Authentication
 
-- **Customer Storefront**:
-  - Customers must login or register to browse products
-  - Email + password authentication
-  - Self-service registration (no approval required)
-  - 24-hour session tokens
-  
-- **Admin Panel**:
-  - Email + password from `.env`
+- **Admin only**: Email + password from `.env` file
   - On first login, credentials are seeded into the database
   - On subsequent logins, database credentials are checked
   - If env vars change, database is updated on next backend restart
-  - 15-minute session tokens (more secure)
+  - 15-minute session tokens
 
 ### Routes
 
-| Path | App | Auth |
-|------|-----|------|
-| `/` | Customer storefront | Required (customer) |
-| `/admin` | Admin panel | Required (admin) |
-| `/api/products` | Product list | None (public endpoint) |
-| `/api/auth/customer-login` | Customer login | None |
-| `/api/auth/customer-register` | Customer register | None |
+| Path | Purpose | Auth |
+|------|---------|------|
+| `/` | Admin panel | Required |
+| `/admin` | Admin panel (alias) | Required |
+| `/api/products` | Public product list | None |
+| `/api/admin/*` | Admin APIs | JWT |
 | `/api/auth/login` | Admin login | None |
-| `/api/admin/*` | Admin APIs | JWT (admin) |
 
 ---
 
@@ -112,9 +94,7 @@ npm run dev:api
 npm run dev
 ```
 
-Visit:
-- Customer storefront: http://localhost:5173
-- Admin panel: http://localhost:5173/admin
+Visit http://localhost:5173 to access the admin panel.
 
 ---
 
@@ -131,8 +111,8 @@ npm run build:server
 npm start
 ```
 
-The backend serves both:
-- Static files (storefront + admin) from `dist/`
+The backend serves:
+- Static files (admin panel) from `dist/`
 - API routes at `/api/*`
 
 ---
@@ -164,57 +144,53 @@ VITE_PUBLIC_API_URL=https://jbrelec.onrender.com
 
 ## Admin Panel Features
 
-- ✅ Product CRUD (create, read, update, delete)
-- ✅ Image upload (base64, stored in database)
-- ✅ Stock management with inline editing
-- ✅ Category & status filters
-- ✅ Search products
-- ✅ CSV export
-- ✅ Publish/unpublish products
-- ✅ Dashboard with stats
-- ✅ Admin authentication with email/password
+✅ **Product Management**
+- Create, read, update, delete products
+- Image upload (base64, stored in database)
+- Bulk operations (delete, activate/deactivate)
 
-## Customer Storefront Features
+✅ **Inventory**
+- Stock management with inline editing
+- Low stock warnings
+- Stock value calculations
 
-- ✅ Customer registration (self-service)
-- ✅ Customer login/logout
-- ✅ Browse all active products (after login)
-- ✅ Category filtering
-- ✅ Search products
-- ✅ Product details modal
-- ✅ Add to cart (local state)
-- ✅ Order via WhatsApp (cart → message)
-- ✅ Responsive design
-- ✅ Session persistence (localStorage)
+✅ **Organization**
+- Category management and filtering
+- Product search
+- Sort by various fields
+
+✅ **Reports**
+- Dashboard with statistics
+- CSV export for products
+- Stock reports
+
+✅ **Security**
+- Admin authentication with email/password
+- JWT tokens (15-minute expiry)
+- Session persistence
+- Auto-sync credentials from environment variables
 
 ---
 
 ## Notes
 
-- **Customer authentication required** — customers must login/register to browse products
-- **Admin authentication separate** — admins use different credentials and panel
-- **No Cloudinary needed** — images are stored in the database as base64
-- **Shared database safe** — admin credentials auto-sync from env vars on startup
-- **Single deployment** — one backend serves both storefront and admin
-- **Customer data stored in PostgreSQL** — `customer_credentials` table
+- **Admin-only application** — no customer storefront
+- **No Cloudinary needed** — images stored as base64 in database
+- **Shared database safe** — credentials auto-sync from env vars on startup
+- **Single deployment** — one backend serves the admin panel
 
 ---
 
 ## Troubleshooting
 
-### Can't login to admin
+### Can't login
 
 1. Check backend is running and `DATABASE_URL` is correct
 2. Run the migration: `ALTER TABLE products RENAME COLUMN image_url TO image_data;`
 3. Restart backend to sync credentials: `npm run dev:api`
 4. Try login with `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `.env`
-
-### Can't login as customer
-
-1. Click "Create one" on the login page to register
-2. Use a valid email and password (min 8 characters)
-3. Check backend logs for errors: `npm run dev:api`
-4. Session is stored in localStorage — check browser console for errors
+5. Check browser console for errors
+6. Check backend logs for authentication errors
 
 ### Images not showing
 
@@ -222,8 +198,25 @@ VITE_PUBLIC_API_URL=https://jbrelec.onrender.com
 - Max ~3-4MB per image
 - Use the "Choose image" button in admin panel (auto-converts to base64)
 
-### Storefront shows login but I want public access
+### Products list is empty
 
-- The current design requires customer authentication
-- To make it public, remove the authentication check in `Storefront.tsx`
-- Update backend to remove JWT validation from `/api/products` route
+- Check `/api/products` returns data: `curl https://jbrelec.onrender.com/api/products`
+- Add products through the admin panel
+- Check database connection is working
+
+### Page is blank after login
+
+- Check browser console for JavaScript errors
+- Verify the build completed successfully
+- Clear browser cache and reload
+- Check `dist/` folder exists with built files
+
+---
+
+## Admin Credentials
+
+Login with:
+- **Email:** godaranitesh75@gmail.com
+- **Password:** Nitesh@1845#
+
+These are stored in `.env` and auto-synced to the database on backend startup.

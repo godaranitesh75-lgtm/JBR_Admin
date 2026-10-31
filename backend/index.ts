@@ -74,18 +74,6 @@ const refreshSchema = z.object({
   refresh_token: z.string().min(40).max(200),
 }).strict();
 
-const customerRegistrationSchema = z.object({
-  email: z.string().trim().email().max(254),
-  password: z.string().min(8).max(256),
-  name: z.string().trim().min(1).max(100).default(""),
-  phone: z.string().trim().max(20).default(""),
-}).strict();
-
-const customerLoginSchema = z.object({
-  email: z.string().trim().email().max(254),
-  password: z.string().min(1).max(256),
-}).strict();
-
 const productSchema = z.object({
   name: z.string().trim().min(1).max(120),
   sku: z.string().trim().max(60).default(""),
@@ -193,16 +181,6 @@ function createAccessToken(secret: string, phone: string): string {
     expiresIn: "15m",
     issuer: "jbr-electrical-api",
     audience: "jbr-electrical-admin",
-  });
-}
-
-function createCustomerAccessToken(secret: string, customerId: string, email: string): string {
-  return jwt.sign({ email, role: "CUSTOMER" }, secret, {
-    algorithm: "HS256",
-    subject: customerId,
-    expiresIn: "24h",
-    issuer: "jbr-electrical-api",
-    audience: "jbr-electrical-customer",
   });
 }
 
@@ -326,24 +304,6 @@ async function ensureTables(pool: Pool): Promise<void> {
         username text not null,
         password_hash text not null,
         updated_at timestamptz not null default now()
-      );
-
-      create table if not exists public.customer_credentials (
-        id uuid primary key default gen_random_uuid(),
-        email text not null unique,
-        password_hash text not null,
-        name text not null default '',
-        phone text not null default '',
-        created_at timestamptz not null default now(),
-        updated_at timestamptz not null default now()
-      );
-
-      create table if not exists public.customer_sessions (
-        id uuid primary key,
-        customer_id uuid not null references customer_credentials(id),
-        refresh_token_hash text not null unique,
-        created_at timestamptz not null default now(),
-        revoked_at timestamptz
       );
     `);
   } catch (error) {
@@ -785,121 +745,6 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
   app.get("/api/auth/me", authenticate(secret), (req, res) => {
     res.json({ user: req.admin });
   });
-
-  // Customer authentication endpoints
-  app.post("/api/auth/customer-register", rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 5,
-    standardHeaders: "draft-8",
-    legacyHeaders: false,
-  }), asyncRoute(async (req, res) => {
-    const input = customerRegistrationSchema.safeParse(req.body);
-    if (!input.success) {
-      publicError(res, 400, validationMessage(input.error));
-      return;
-    }
-    const emailLower = input.data.email.toLowerCase();
-    
-    // Check if customer already exists
-    const existing = await pool.query<{ id: string }>(
-      "select id from customer_credentials where email = $1",
-      [emailLower],
-    );
-    if (existing.rows[0]) {
-      publicError(res, 409, "An account with this email already exists.");
-      return;
-    }
-
-    // Hash password and create customer
-    const passwordHash = await hashPassword(input.data.password);
-    const result = await pool.query<{ id: string; email: string; name: string; phone: string }>(
-      `insert into customer_credentials (email, password_hash, name, phone)
-       values ($1, $2, $3, $4)
-       returning id, email, name, phone`,
-      [emailLower, passwordHash, input.data.name, input.data.phone],
-    );
-
-    const customer = result.rows[0];
-    const refreshToken = randomBytes(48).toString("base64url");
-    await pool.query(
-      "insert into customer_sessions (id, customer_id, refresh_token_hash) values ($1, $2, $3)",
-      [randomUUID(), customer.id, hashRefreshToken(refreshToken)],
-    );
-
-    res.status(201).json({
-      access_token: createCustomerAccessToken(secret, customer.id, customer.email),
-      refresh_token: refreshToken,
-      user: {
-        id: customer.id,
-        email: customer.email,
-        name: customer.name,
-        phone: customer.phone,
-        role: "CUSTOMER",
-      },
-    });
-  }));
-
-  app.post("/api/auth/customer-login", rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 10,
-    standardHeaders: "draft-8",
-    legacyHeaders: false,
-  }), asyncRoute(async (req, res) => {
-    const input = customerLoginSchema.safeParse(req.body);
-    if (!input.success) {
-      publicError(res, 400, "Enter a valid email and password.");
-      return;
-    }
-
-    const emailLower = input.data.email.toLowerCase();
-    const result = await pool.query<{ id: string; email: string; password_hash: string; name: string; phone: string }>(
-      "select id, email, password_hash, name, phone from customer_credentials where email = $1",
-      [emailLower],
-    );
-
-    const customer = result.rows[0];
-    if (!customer) {
-      publicError(res, 401, "The email or password is incorrect.");
-      return;
-    }
-
-    const valid = await verifyPassword(input.data.password, customer.password_hash);
-    if (!valid) {
-      publicError(res, 401, "The email or password is incorrect.");
-      return;
-    }
-
-    const refreshToken = randomBytes(48).toString("base64url");
-    await pool.query(
-      "insert into customer_sessions (id, customer_id, refresh_token_hash) values ($1, $2, $3)",
-      [randomUUID(), customer.id, hashRefreshToken(refreshToken)],
-    );
-
-    res.json({
-      access_token: createCustomerAccessToken(secret, customer.id, customer.email),
-      refresh_token: refreshToken,
-      user: {
-        id: customer.id,
-        email: customer.email,
-        name: customer.name,
-        phone: customer.phone,
-        role: "CUSTOMER",
-      },
-    });
-  }));
-
-  app.post("/api/auth/customer-logout", asyncRoute(async (req, res) => {
-    const input = refreshSchema.safeParse(req.body);
-    if (!input.success) {
-      publicError(res, 400, "The sign-in session could not be ended.");
-      return;
-    }
-    await pool.query(
-      "update customer_sessions set revoked_at = now() where refresh_token_hash = $1 and revoked_at is null",
-      [hashRefreshToken(input.data.refresh_token)],
-    );
-    res.status(204).end();
-  }));
 
   app.get("/api/products", asyncRoute(async (_req, res) => {
     const result = await pool.query<ProductRecord>(

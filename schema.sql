@@ -27,24 +27,6 @@ create table if not exists public.admin_credentials (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists public.customer_credentials (
-  id uuid primary key default gen_random_uuid(),
-  email text not null unique,
-  password_hash text not null,
-  name text not null default '',
-  phone text not null default '',
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
-create table if not exists public.customer_sessions (
-  id uuid primary key,
-  customer_id uuid not null references customer_credentials(id),
-  refresh_token_hash text not null unique,
-  created_at timestamptz not null default now(),
-  revoked_at timestamptz
-);
-
 create index if not exists products_active_name_idx
   on public.products (active, name);
 

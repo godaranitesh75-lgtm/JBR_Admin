@@ -1298,7 +1298,7 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
   const [registrationCode, setRegistrationCode] = useState("");
 
   return <div className="modal-backdrop login-backdrop"><section className="login-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title">
-    <a className="brand login-brand" href="/" aria-label="Back to storefront"><BrandMark /><span className="brand-copy"><strong>JBR <span>Electrical</span></strong><small>ADMIN PANEL</small></span></a>
+    <div className="brand login-brand"><BrandMark /><span className="brand-copy"><strong>JBR <span>Electrical</span></strong><small>ADMIN PANEL</small></span></div>
     <div className="login-art"><span className="login-bolt"><Icon name="bolt" /></span><span className="login-art-label">STORE MANAGEMENT</span></div>
     <div className="login-content">
       <span className="dialog-eyebrow">ADMIN ACCESS</span>
@@ -1320,7 +1320,6 @@ function LoginDialog({ onSignIn, onRegister, loading, error, email, setEmail, pa
         {registering ? <>Already registered? <strong>Sign in</strong></> : <>First time? <strong>Register as administrator</strong></>}
       </button>}
       <p className="login-security"><Icon name="lock" /> Your sign-in stays active on this device until you sign out.</p>
-      <a className="login-back-link" href="/">← Back to storefront</a>
     </div>
   </section></div>;
 }
