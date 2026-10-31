@@ -31,7 +31,7 @@ type ProductRecord = QueryResultRow & {
   description: string;
   price: string | number;
   stock: number;
-  image_url: string;
+  image_data: string;
   active: boolean;
   created_at: Date | string;
   updated_at: Date | string;
@@ -74,6 +74,18 @@ const refreshSchema = z.object({
   refresh_token: z.string().min(40).max(200),
 }).strict();
 
+const customerRegistrationSchema = z.object({
+  email: z.string().trim().email().max(254),
+  password: z.string().min(8).max(256),
+  name: z.string().trim().min(1).max(100).default(""),
+  phone: z.string().trim().max(20).default(""),
+}).strict();
+
+const customerLoginSchema = z.object({
+  email: z.string().trim().email().max(254),
+  password: z.string().min(1).max(256),
+}).strict();
+
 const productSchema = z.object({
   name: z.string().trim().min(1).max(120),
   sku: z.string().trim().max(60).default(""),
@@ -81,14 +93,10 @@ const productSchema = z.object({
   description: z.string().max(1000).default(""),
   price: z.coerce.number().finite().min(0).max(9_999_999_999),
   stock: z.coerce.number().int().min(0).max(1_000_000_000),
-  image_url: z.string().max(2048).default("").refine((value) => {
+  image_data: z.string().max(5_000_000).default("").refine((value) => {
     if (!value) return true;
-    try {
-      return new URL(value).protocol === "https:";
-    } catch {
-      return false;
-    }
-  }, "Product images must use a secure HTTPS URL."),
+    return value.startsWith("data:image/");
+  }, "Product images must be base64 data URLs starting with data:image/."),
   active: z.boolean().default(true),
 }).strict();
 
@@ -188,6 +196,16 @@ function createAccessToken(secret: string, phone: string): string {
   });
 }
 
+function createCustomerAccessToken(secret: string, customerId: string, email: string): string {
+  return jwt.sign({ email, role: "CUSTOMER" }, secret, {
+    algorithm: "HS256",
+    subject: customerId,
+    expiresIn: "24h",
+    issuer: "jbr-electrical-api",
+    audience: "jbr-electrical-customer",
+  });
+}
+
 function createTwilioVerify(config: TwilioVerifyConfig) {
   const endpoint = `https://verify.twilio.com/v2/Services/${encodeURIComponent(config.serviceSid)}`;
   const authorization = `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString("base64")}`;
@@ -224,7 +242,7 @@ function productFromRow(row: ProductRecord) {
     description: row.description,
     price: Number(row.price),
     stock: row.stock,
-    image_url: row.image_url,
+    image_data: row.image_data || "",
     active: row.active,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -289,7 +307,7 @@ async function ensureTables(pool: Pool): Promise<void> {
         description text not null default '',
         price numeric(12, 2) not null default 0 check (price between 0 and 9999999999),
         stock integer not null default 0 check (stock between 0 and 1000000000),
-        image_url text not null default '',
+        image_data text not null default '',
         active boolean not null default true,
         created_at timestamptz not null default now(),
         updated_at timestamptz not null default now()
@@ -308,6 +326,24 @@ async function ensureTables(pool: Pool): Promise<void> {
         username text not null,
         password_hash text not null,
         updated_at timestamptz not null default now()
+      );
+
+      create table if not exists public.customer_credentials (
+        id uuid primary key default gen_random_uuid(),
+        email text not null unique,
+        password_hash text not null,
+        name text not null default '',
+        phone text not null default '',
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      );
+
+      create table if not exists public.customer_sessions (
+        id uuid primary key,
+        customer_id uuid not null references customer_credentials(id),
+        refresh_token_hash text not null unique,
+        created_at timestamptz not null default now(),
+        revoked_at timestamptz
       );
     `);
   } catch (error) {
@@ -750,16 +786,131 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json({ user: req.admin });
   });
 
+  // Customer authentication endpoints
+  app.post("/api/auth/customer-register", rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }), asyncRoute(async (req, res) => {
+    const input = customerRegistrationSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, validationMessage(input.error));
+      return;
+    }
+    const emailLower = input.data.email.toLowerCase();
+    
+    // Check if customer already exists
+    const existing = await pool.query<{ id: string }>(
+      "select id from customer_credentials where email = $1",
+      [emailLower],
+    );
+    if (existing.rows[0]) {
+      publicError(res, 409, "An account with this email already exists.");
+      return;
+    }
+
+    // Hash password and create customer
+    const passwordHash = await hashPassword(input.data.password);
+    const result = await pool.query<{ id: string; email: string; name: string; phone: string }>(
+      `insert into customer_credentials (email, password_hash, name, phone)
+       values ($1, $2, $3, $4)
+       returning id, email, name, phone`,
+      [emailLower, passwordHash, input.data.name, input.data.phone],
+    );
+
+    const customer = result.rows[0];
+    const refreshToken = randomBytes(48).toString("base64url");
+    await pool.query(
+      "insert into customer_sessions (id, customer_id, refresh_token_hash) values ($1, $2, $3)",
+      [randomUUID(), customer.id, hashRefreshToken(refreshToken)],
+    );
+
+    res.status(201).json({
+      access_token: createCustomerAccessToken(secret, customer.id, customer.email),
+      refresh_token: refreshToken,
+      user: {
+        id: customer.id,
+        email: customer.email,
+        name: customer.name,
+        phone: customer.phone,
+        role: "CUSTOMER",
+      },
+    });
+  }));
+
+  app.post("/api/auth/customer-login", rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }), asyncRoute(async (req, res) => {
+    const input = customerLoginSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "Enter a valid email and password.");
+      return;
+    }
+
+    const emailLower = input.data.email.toLowerCase();
+    const result = await pool.query<{ id: string; email: string; password_hash: string; name: string; phone: string }>(
+      "select id, email, password_hash, name, phone from customer_credentials where email = $1",
+      [emailLower],
+    );
+
+    const customer = result.rows[0];
+    if (!customer) {
+      publicError(res, 401, "The email or password is incorrect.");
+      return;
+    }
+
+    const valid = await verifyPassword(input.data.password, customer.password_hash);
+    if (!valid) {
+      publicError(res, 401, "The email or password is incorrect.");
+      return;
+    }
+
+    const refreshToken = randomBytes(48).toString("base64url");
+    await pool.query(
+      "insert into customer_sessions (id, customer_id, refresh_token_hash) values ($1, $2, $3)",
+      [randomUUID(), customer.id, hashRefreshToken(refreshToken)],
+    );
+
+    res.json({
+      access_token: createCustomerAccessToken(secret, customer.id, customer.email),
+      refresh_token: refreshToken,
+      user: {
+        id: customer.id,
+        email: customer.email,
+        name: customer.name,
+        phone: customer.phone,
+        role: "CUSTOMER",
+      },
+    });
+  }));
+
+  app.post("/api/auth/customer-logout", asyncRoute(async (req, res) => {
+    const input = refreshSchema.safeParse(req.body);
+    if (!input.success) {
+      publicError(res, 400, "The sign-in session could not be ended.");
+      return;
+    }
+    await pool.query(
+      "update customer_sessions set revoked_at = now() where refresh_token_hash = $1 and revoked_at is null",
+      [hashRefreshToken(input.data.refresh_token)],
+    );
+    res.status(204).end();
+  }));
+
   app.get("/api/products", asyncRoute(async (_req, res) => {
     const result = await pool.query<ProductRecord>(
-      "select id, name, sku, category, description, price, stock, image_url, active, created_at, updated_at from products where active = true order by name asc",
+      "select id, name, sku, category, description, price, stock, image_data, active, created_at, updated_at from products where active = true order by name asc",
     );
     res.json(result.rows.map(productFromRow));
   }));
 
   app.get("/api/admin/products", catalogAccess, asyncRoute(async (_req, res) => {
     const result = await pool.query<ProductRecord>(
-      "select id, name, sku, category, description, price, stock, image_url, active, created_at, updated_at from products order by updated_at desc",
+      "select id, name, sku, category, description, price, stock, image_data, active, created_at, updated_at from products order by updated_at desc",
     );
     res.json(result.rows.map(productFromRow));
   }));
@@ -772,10 +923,10 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     }
     const product = input.data;
     const result = await pool.query<ProductRecord>(
-      `insert into products (name, sku, category, description, price, stock, image_url, active)
+      `insert into products (name, sku, category, description, price, stock, image_data, active)
        values ($1, $2, $3, $4, $5, $6, $7, $8)
-       returning id, name, sku, category, description, price, stock, image_url, active, created_at, updated_at`,
-      [product.name, product.sku, product.category, product.description, product.price, product.stock, product.image_url, product.active],
+       returning id, name, sku, category, description, price, stock, image_data, active, created_at, updated_at`,
+      [product.name, product.sku, product.category, product.description, product.price, product.stock, product.image_data, product.active],
     );
     res.status(201).json(productFromRow(result.rows[0]));
   }));
@@ -790,10 +941,10 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     const product = input.data;
     const result = await pool.query<ProductRecord>(
       `update products
-       set name = $2, sku = $3, category = $4, description = $5, price = $6, stock = $7, image_url = $8, active = $9, updated_at = now()
+       set name = $2, sku = $3, category = $4, description = $5, price = $6, stock = $7, image_data = $8, active = $9, updated_at = now()
        where id = $1
-       returning id, name, sku, category, description, price, stock, image_url, active, created_at, updated_at`,
-      [req.params.id, product.name, product.sku, product.category, product.description, product.price, product.stock, product.image_url, product.active],
+       returning id, name, sku, category, description, price, stock, image_data, active, created_at, updated_at`,
+      [req.params.id, product.name, product.sku, product.category, product.description, product.price, product.stock, product.image_data, product.active],
     );
     if (!result.rowCount) {
       publicError(res, 404, "This product no longer exists.");

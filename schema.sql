@@ -6,7 +6,7 @@ create table if not exists public.products (
   description text not null default '',
   price numeric(12, 2) not null default 0 check (price between 0 and 9999999999),
   stock integer not null default 0 check (stock between 0 and 1000000000),
-  image_url text not null default '',
+  image_data text not null default '',
   active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -25,6 +25,24 @@ create table if not exists public.admin_credentials (
   username text not null,
   password_hash text not null,
   updated_at timestamptz not null default now()
+);
+
+create table if not exists public.customer_credentials (
+  id uuid primary key default gen_random_uuid(),
+  email text not null unique,
+  password_hash text not null,
+  name text not null default '',
+  phone text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.customer_sessions (
+  id uuid primary key,
+  customer_id uuid not null references customer_credentials(id),
+  refresh_token_hash text not null unique,
+  created_at timestamptz not null default now(),
+  revoked_at timestamptz
 );
 
 create index if not exists products_active_name_idx

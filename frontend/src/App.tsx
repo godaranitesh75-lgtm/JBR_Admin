@@ -12,7 +12,7 @@ type Product = {
   description: string;
   price: number;
   stock: number;
-  image_url: string;
+  image_data: string;
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -114,12 +114,12 @@ function initialCatalog(): Product[] {
   if (saved) return saved;
   const created = new Date().toISOString();
   return [
-    { id: makeId(), name: "LED Bulb, 9W Cool White", sku: "JBR-LB-009", category: "Lighting", description: "Energy-saving LED bulb with bright cool-white light for homes and workspaces.", price: 85, stock: 42, image_url: "", active: true, created_at: created, updated_at: created },
-    { id: makeId(), name: "Modular Switch, 6A", sku: "JBR-SW-006", category: "Switches", description: "Durable 6 amp modular switch with a smooth, reliable operating feel.", price: 45, stock: 3, image_url: "", active: true, created_at: created, updated_at: created },
-    { id: makeId(), name: "Copper Wire, 1.5 sq mm", sku: "JBR-WR-015", category: "Wires & Cables", description: "Flexible, high-conductivity copper wire for safe household electrical installations.", price: 1450, stock: 18, image_url: "", active: true, created_at: created, updated_at: created },
-    { id: makeId(), name: "MCB, Double Pole 32A", sku: "JBR-MC-032", category: "Protection", description: "Double-pole miniature circuit breaker for dependable circuit protection.", price: 520, stock: 0, image_url: "", active: false, created_at: created, updated_at: created },
-    { id: makeId(), name: "Ceiling Fan, 1200 mm", sku: "JBR-FN-120", category: "Fans", description: "Quiet, high-air-delivery ceiling fan with a clean modern finish.", price: 1890, stock: 6, image_url: "", active: true, created_at: created, updated_at: created },
-    { id: makeId(), name: "LED Batten, 20W", sku: "JBR-LB-020", category: "Lighting", description: "Slim 20 watt LED batten for bright and even illumination.", price: 240, stock: 27, image_url: "", active: true, created_at: created, updated_at: created },
+    { id: makeId(), name: "LED Bulb, 9W Cool White", sku: "JBR-LB-009", category: "Lighting", description: "Energy-saving LED bulb with bright cool-white light for homes and workspaces.", price: 85, stock: 42, image_data: "", active: true, created_at: created, updated_at: created },
+    { id: makeId(), name: "Modular Switch, 6A", sku: "JBR-SW-006", category: "Switches", description: "Durable 6 amp modular switch with a smooth, reliable operating feel.", price: 45, stock: 3, image_data: "", active: true, created_at: created, updated_at: created },
+    { id: makeId(), name: "Copper Wire, 1.5 sq mm", sku: "JBR-WR-015", category: "Wires & Cables", description: "Flexible, high-conductivity copper wire for safe household electrical installations.", price: 1450, stock: 18, image_data: "", active: true, created_at: created, updated_at: created },
+    { id: makeId(), name: "MCB, Double Pole 32A", sku: "JBR-MC-032", category: "Protection", description: "Double-pole miniature circuit breaker for dependable circuit protection.", price: 520, stock: 0, image_data: "", active: false, created_at: created, updated_at: created },
+    { id: makeId(), name: "Ceiling Fan, 1200 mm", sku: "JBR-FN-120", category: "Fans", description: "Quiet, high-air-delivery ceiling fan with a clean modern finish.", price: 1890, stock: 6, image_data: "", active: true, created_at: created, updated_at: created },
+    { id: makeId(), name: "LED Batten, 20W", sku: "JBR-LB-020", category: "Lighting", description: "Slim 20 watt LED batten for bright and even illumination.", price: 240, stock: 27, image_data: "", active: true, created_at: created, updated_at: created },
   ];
 }
 
@@ -161,7 +161,7 @@ function productFromUnknown(value: unknown): Product | null {
     description: typeof row.description === "string" ? row.description.slice(0, 1000) : "",
     price: numericPrice,
     stock: numericStock,
-    image_url: typeof row.image_url === "string" ? row.image_url : "",
+    image_data: typeof row.image_data === "string" ? row.image_data : "",
     active: row.active !== false,
     created_at: typeof row.created_at === "string" ? row.created_at : now,
     updated_at: typeof row.updated_at === "string" ? row.updated_at : now,
@@ -204,10 +204,10 @@ async function renewSession(config: AppSettings, refreshToken: string): Promise<
   return renewed;
 }
 
-function ProductPhoto({ product, className = "" }: { product: Pick<Product, "name" | "image_url">; className?: string }) {
+function ProductPhoto({ product, className = "" }: { product: Pick<Product, "name" | "image_data">; className?: string }) {
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [product.image_url]);
-  return <div className={`product-thumb ${className}`}>{product.image_url && !failed ? <img src={product.image_url} alt="" loading="lazy" onError={() => setFailed(true)} /> : <Icon name="image" />}</div>;
+  useEffect(() => setFailed(false), [product.image_data]);
+  return <div className={`product-thumb ${className}`}>{product.image_data && !failed ? <img src={product.image_data} alt="" loading="lazy" onError={() => setFailed(true)} /> : <Icon name="image" />}</div>;
 }
 
 function App() {
@@ -400,7 +400,7 @@ function App() {
         description: product.description,
         price: product.price,
         stock: product.stock,
-        image_url: product.image_url,
+        image_data: product.image_data,
         active: product.active,
       };
       const url = `${apiBase(settings)}/api/admin/products${exists ? `/${encodeURIComponent(product.id)}` : ""}`;
@@ -426,7 +426,7 @@ function App() {
       description: product.description,
       price: product.price,
       stock: product.stock,
-      image_url: product.image_url,
+      image_data: product.image_data,
       active: product.active,
     };
     const isExisting = products.some((item) => item.id === product.id);
@@ -764,7 +764,7 @@ function App() {
 
   const exportCatalog = (format: "csv" | "json") => {
     if (format === "csv") {
-      const columns: Array<keyof Product> = ["name", "sku", "category", "description", "price", "stock", "image_url", "active", "created_at", "updated_at"];
+      const columns: Array<keyof Product> = ["name", "sku", "category", "description", "price", "stock", "image_data", "active", "created_at", "updated_at"];
       const quote = (value: string | number | boolean) => `"${String(value).replaceAll('"', '""')}"`;
       const rows = [columns.join(","), ...products.map((product) => columns.map((column) => quote(product[column])).join(","))];
       downloadFile("jbr-electrical-products.csv", rows.join("\r\n"), "text/csv;charset=utf-8");
@@ -1042,7 +1042,7 @@ function StorefrontView({ products, count, search, setSearch, changeView }: { pr
         </div>
         <div className="live-hero-art">
           <div className="live-category-grid">{categoryHighlights.map(({ category, product }) => <div className="live-category-tile" key={category}>
-            <div className="live-category-image">{product?.image_url ? <img src={product.image_url} alt="" loading="lazy" /> : <Icon name="bolt" />}</div><span>{category}</span>
+            <div className="live-category-image">{product?.image_data ? <img src={product.image_data} alt="" loading="lazy" /> : <Icon name="bolt" />}</div><span>{category}</span>
           </div>)}</div>
           <div className="live-hero-stamp"><span>JBR</span><strong>Electrical<br />partner</strong></div>
         </div>
@@ -1055,7 +1055,7 @@ function StorefrontView({ products, count, search, setSearch, changeView }: { pr
           {categories.map((category) => <button className={categoryFilter === category ? "is-active" : ""} key={category} onClick={() => setCategoryFilter(category)}>{category}</button>)}
         </div>}
         {visibleProducts.length > 0 ? <div className="live-product-grid">{visibleProducts.map((product) => <article className="live-product-card" key={product.id}>
-          <div className="live-product-image">{product.image_url ? <img src={product.image_url} alt={product.name} loading="lazy" /> : <Icon name="image" />}<span>{product.category}</span></div>
+          <div className="live-product-image">{product.image_data ? <img src={product.image_data} alt={product.name} loading="lazy" /> : <Icon name="image" />}<span>{product.category}</span></div>
           <div className="live-product-copy"><h3>{product.name}</h3>{product.sku && <small>{product.sku}</small>}<p>{product.description || "Quality electrical supplies for your home, business, or project."}</p>
             <div className="live-product-actions"><strong>{formatPrice(product.price)}</strong><a href={`https://wa.me/916377374179?text=${encodeURIComponent(`Hello JBR Electrical, I would like to enquire about ${product.name}${product.sku ? ` (${product.sku})` : ""}.`)}`} target="_blank" rel="noreferrer">Enquire <span aria-hidden="true">↗</span></a></div>
           </div>
@@ -1174,7 +1174,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
   notify: (message: string, error?: boolean) => void;
 }) {
   const editing = Boolean(product);
-  const [imageUrl, setImageUrl] = useState(product?.image_url ?? "");
+  const [imageUrl, setImageUrl] = useState(product?.image_data ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const cloudReady = Boolean(settings.cloudName && settings.uploadPreset);
@@ -1203,7 +1203,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
       setError("Price must be zero or more, and stock must be a whole number of zero or more.");
       return;
     }
-    const suppliedUrl = String(form.get("image_url") ?? "").trim() || imageUrl;
+    const suppliedUrl = String(form.get("image_data") ?? "").trim() || imageUrl;
     if (suppliedUrl && !suppliedUrl.startsWith("data:image/")) {
       try {
         const url = new URL(suppliedUrl);
@@ -1224,7 +1224,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
       description: String(form.get("description") ?? "").trim(),
       price,
       stock,
-      image_url: suppliedUrl,
+      image_data: suppliedUrl,
       active: Boolean(form.get("active")),
       created_at: product?.created_at ?? now,
       updated_at: now,
@@ -1253,7 +1253,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
           <div className="form-field full-width">
             <label className="field-label">Product image</label>
             <div className="image-upload-row">
-              <ProductPhoto product={{ name: "Image preview", image_url: imageUrl }} className="image-preview" />
+              <ProductPhoto product={{ name: "Image preview", image_data: imageUrl }} className="image-preview" />
               <div className="upload-copy">
                 <strong>{imageUrl ? "Product image selected" : "Add a product photo"}</strong>
                 <p>{cloudReady ? "JPEG, PNG, WebP or AVIF, up to 8 MB. Stored in Cloudinary." : mode === "remote" ? "Connect Cloudinary in Settings before uploading a photo." : "JPEG, PNG, WebP or AVIF, up to 8 MB. Stored in this browser."}</p>
@@ -1271,7 +1271,7 @@ function ProductDialog({ product, categories, mode, settings, onClose, onSave, o
             </div>
             <input ref={cameraPickerRef} className="native-camera-fallback" type="file" accept="image/*" capture="environment" tabIndex={-1} aria-label="Take a product photo" disabled={(mode === "remote" && !cloudReady) || saving} onChange={(event) => void onUploadImage(event, setImageUrl)} />
             <label className="field-label image-url-label" htmlFor="product-image-url">Or paste an image URL</label>
-            <input className="text-input" id="product-image-url" name="image_url" type="url" placeholder="https://…" value={imageUrl.startsWith("data:") ? "" : imageUrl} onChange={(event) => setImageUrl(event.target.value)} />
+            <input className="text-input" id="product-image-url" name="image_data" type="url" placeholder="https://…" value={imageUrl.startsWith("data:") ? "" : imageUrl} onChange={(event) => setImageUrl(event.target.value)} />
           </div>
           <div className="form-field full-width"><label className="field-label" htmlFor="product-description">Description</label><textarea className="text-input text-area" id="product-description" name="description" rows={3} maxLength={1000} placeholder="Tell customers what makes this product right for their project." defaultValue={product?.description ?? ""} /></div>
         </div>

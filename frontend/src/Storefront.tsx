@@ -11,7 +11,7 @@ type Product = {
   description: string;
   price: number;
   stock: number;
-  image_url: string;
+  image_data: string;
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -84,11 +84,11 @@ function Icon({ name, className }: { name: IconName; className?: string }) {
 
 // ─── Product Image ─────────────────────────────────────────────────────────────
 
-function ProductImage({ product, className }: { product: Pick<Product, "name" | "image_url">; className?: string }) {
+function ProductImage({ product, className }: { product: Pick<Product, "name" | "image_data">; className?: string }) {
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [product.image_url]);
-  if (product.image_url && !failed) {
-    return <img src={product.image_url} alt={product.name} loading="lazy" onError={() => setFailed(true)} className={className} />;
+  useEffect(() => setFailed(false), [product.image_data]);
+  if (product.image_data && !failed) {
+    return <img src={product.image_data} alt={product.name} loading="lazy" onError={() => setFailed(true)} className={className} />;
   }
   return <span className={`sf-img-fallback ${className ?? ""}`}><Icon name="image" /></span>;
 }
@@ -223,6 +223,11 @@ function ProductModal({ product, onClose, onAddToCart }: {
 
 // ─── Main Storefront App ───────────────────────────────────────────────────────
 
+type AuthSession = {
+  email: string;
+  token: string;
+};
+
 export default function Storefront() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -234,6 +239,16 @@ export default function Storefront() {
   const [modalProduct, setModalProduct] = useState<Product | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  
+  // Authentication state
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [showRegister, setShowRegister] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [registerName, setRegisterName] = useState("");
+  const [registerPhone, setRegisterPhone] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
 
   const notify = useCallback((message: string, error = false) => {
     const id = Date.now() + Math.random();
@@ -241,11 +256,128 @@ export default function Storefront() {
     window.setTimeout(() => setToasts((current) => current.filter((t) => t.id !== id)), 3200);
   }, []);
 
-  // Fetch public product catalog
+  // Check for saved session on mount
   useEffect(() => {
+    const saved = localStorage.getItem("jbr-customer-session");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved) as AuthSession;
+        if (parsed.email && parsed.token) {
+          setSession(parsed);
+        }
+      } catch {
+        localStorage.removeItem("jbr-customer-session");
+      }
+    }
+  }, []);
+
+  // Login handler
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError("");
+    setLoggingIn(true);
+
+    try {
+      const url = API_URL ? `${API_URL}/api/auth/customer-login` : "/api/auth/customer-login";
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({ error: "Login failed" }));
+        throw new Error((data as { error?: string }).error || "Invalid email or password");
+      }
+
+      const data = await response.json() as { access_token: string; user: { email: string } };
+      const newSession = { email: data.user.email, token: data.access_token };
+      
+      localStorage.setItem("jbr-customer-session", JSON.stringify(newSession));
+      setSession(newSession);
+      setLoginEmail("");
+      setLoginPassword("");
+      notify("Welcome to JBR Electrical!");
+    } catch (err: unknown) {
+      setLoginError(err instanceof Error ? err.message : "Could not sign in");
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  // Register handler
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError("");
+    
+    if (loginPassword.length < 8) {
+      setLoginError("Password must be at least 8 characters");
+      return;
+    }
+    
+    setLoggingIn(true);
+
+    try {
+      const url = API_URL ? `${API_URL}/api/auth/customer-register` : "/api/auth/customer-register";
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: loginEmail,
+          password: loginPassword,
+          name: registerName,
+          phone: registerPhone,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({ error: "Registration failed" }));
+        throw new Error((data as { error?: string }).error || "Could not create account");
+      }
+
+      const data = await response.json() as { access_token: string; user: { email: string } };
+      const newSession = { email: data.user.email, token: data.access_token };
+      
+      localStorage.setItem("jbr-customer-session", JSON.stringify(newSession));
+      setSession(newSession);
+      setLoginEmail("");
+      setLoginPassword("");
+      setRegisterName("");
+      setRegisterPhone("");
+      notify("Account created! Welcome to JBR Electrical!");
+    } catch (err: unknown) {
+      setLoginError(err instanceof Error ? err.message : "Could not create account");
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  // Logout handler
+  const handleLogout = () => {
+    localStorage.removeItem("jbr-customer-session");
+    setSession(null);
+    setCart([]);
+    notify("Signed out successfully");
+  };
+
+  // Fetch products (only when logged in)
+  useEffect(() => {
+    if (!session) {
+      setLoading(false);
+      return;
+    }
+
     const url = API_URL ? `${API_URL}/api/products` : "/api/products";
-    fetch(url)
+    fetch(url, {
+      headers: { Authorization: `Bearer ${session.token}` },
+    })
       .then((res) => {
+        if (res.status === 401) {
+          // Token expired
+          localStorage.removeItem("jbr-customer-session");
+          setSession(null);
+          throw new Error("Session expired. Please sign in again.");
+        }
         if (!res.ok) throw new Error(`Server error ${res.status}`);
         return res.json() as Promise<Product[]>;
       })
@@ -257,7 +389,7 @@ export default function Storefront() {
         setError(err instanceof Error ? err.message : "Could not load products.");
         setLoading(false);
       });
-  }, []);
+  }, [session]);
 
   const categories = useMemo(() => [...new Set(products.map((p) => p.category))].sort(), [products]);
 
@@ -299,6 +431,96 @@ export default function Storefront() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
+  // If not logged in, show login form
+  if (!session) {
+    return (
+      <div className="sf-login-page">
+        <div className="sf-login-container">
+          <div className="sf-login-brand">
+            <span className="sf-logo-mark"><Icon name="bolt" /></span>
+            <div>
+              <h1>JBR Electrical</h1>
+              <p>{showRegister ? "Create an account" : "Sign in to browse our products"}</p>
+            </div>
+          </div>
+
+          <form className="sf-login-form" onSubmit={showRegister ? handleRegister : handleLogin}>
+            {showRegister && (
+              <>
+                <div className="sf-form-field">
+                  <label htmlFor="customer-name">Name (optional)</label>
+                  <input
+                    id="customer-name"
+                    type="text"
+                    value={registerName}
+                    onChange={(e) => setRegisterName(e.target.value)}
+                    placeholder="Your name"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="sf-form-field">
+                  <label htmlFor="customer-phone">Phone (optional)</label>
+                  <input
+                    id="customer-phone"
+                    type="tel"
+                    value={registerPhone}
+                    onChange={(e) => setRegisterPhone(e.target.value)}
+                    placeholder="Your phone number"
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="sf-form-field">
+              <label htmlFor="customer-email">Email address</label>
+              <input
+                id="customer-email"
+                type="email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                placeholder="your@email.com"
+                required
+                autoFocus={!showRegister}
+              />
+            </div>
+
+            <div className="sf-form-field">
+              <label htmlFor="customer-password">Password</label>
+              <input
+                id="customer-password"
+                type="password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder={showRegister ? "At least 8 characters" : "Enter your password"}
+                required
+              />
+            </div>
+
+            {loginError && (
+              <div className="sf-login-error">
+                <Icon name="alert" />
+                <span>{loginError}</span>
+              </div>
+            )}
+
+            <button type="submit" className="sf-login-btn" disabled={loggingIn}>
+              {loggingIn ? (showRegister ? "Creating account..." : "Signing in...") : (showRegister ? "Create account" : "Sign in")}
+            </button>
+
+            <p className="sf-login-note" style={{ textAlign: "center" }}>
+              {showRegister ? (
+                <>Already have an account? <button type="button" onClick={() => setShowRegister(false)} style={{ background: "none", border: "none", color: "var(--sf-primary)", textDecoration: "underline", cursor: "pointer" }}>Sign in</button></>
+              ) : (
+                <>Don't have an account? <button type="button" onClick={() => setShowRegister(true)} style={{ background: "none", border: "none", color: "var(--sf-primary)", textDecoration: "underline", cursor: "pointer" }}>Create one</button></>
+              )}
+            </p>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       {/* ── Header ── */}
@@ -322,6 +544,9 @@ export default function Storefront() {
             <button className="sf-cart-btn" onClick={() => setCartOpen(true)} aria-label={`Open cart, ${cartCount} items`}>
               <Icon name="cart" />
               {cartCount > 0 && <span className="sf-cart-badge">{cartCount}</span>}
+            </button>
+            <button className="sf-user-btn" onClick={handleLogout} title={`Signed in as ${session.email}`}>
+              <Icon name="close" />
             </button>
             <button className="sf-hamburger" onClick={() => setMobileMenuOpen((o) => !o)} aria-label="Toggle menu" aria-expanded={mobileMenuOpen}>
               <span /><span /><span />
