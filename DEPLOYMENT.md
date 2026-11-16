@@ -1,135 +1,30 @@
-# Deployment Guide - JBR Electrical Admin Panel
+# JBR Electrical admin deployment
 
-## What This Is
+The admin frontend must call the same JBR store API and PostgreSQL database as the customer storefront.
 
-An **admin-only product management system** for JBR Electrical. No customer storefront, no customer authentication.
+## Admin frontend
 
----
+Set these Vercel **build** environment values, then redeploy:
 
-## Quick Deploy Steps
-
-### 1. Push to Git
-
-```bash
-git add .
-git commit -m "Admin-only product management system with base64 images"
-git push origin main
+```text
+VITE_PUBLIC_API_URL=https://jbrelec.onrender.com
+VITE_LOCAL_DEMO_MODE=false
+VITE_PUBLIC_CATALOG_WRITES=false
 ```
 
-### 2. Render.com Will Auto-Deploy
+Set the API's CORS allowlist (`CORS_ORIGIN` or `ALLOWED_ORIGINS`) to include the admin site's exact HTTPS origin. Do not configure database credentials or administrator passwords in the frontend.
 
-Your backend is at: `https://jbrelec.onrender.com`
+## Store API database
 
-Environment variables already set:
-- `DATABASE_URL` - Neon PostgreSQL connection
-- `ADMIN_EMAIL` - godaranitesh75@gmail.com
-- `ADMIN_PASSWORD` - Nitesh@1845#
-- `JWT_SECRET` - your secret key
-- `NODE_ENV` - production
-- `PORT` - 3000
+Back up the production database. In the JBR storefront repository, confirm the `DATABASE_URL` targets the live store database and inspect whether catalog data already exists. If its Prisma schema is missing, run `npm run prisma:generate` and `npm run prisma:push` from that repository's `backend` directory. Do not run its seed script in production; it deletes records. If an older catalog exists in a different schema, migrate it deliberately to avoid a second empty catalog.
 
-### 3. Database Migration
+## Verify
 
-If you haven't already, run this once in Neon SQL Editor:
+1. Open the API `/api/health` endpoint.
+2. In admin Settings, save the Vercel proxy URL. The panel checks the product endpoint as well as health.
+3. Sign in with an existing user assigned the `ADMIN` role.
+4. Create a test product and verify it appears on the customer storefront.
 
-```sql
-ALTER TABLE products RENAME COLUMN image_url TO image_data;
-```
+For detailed setup and troubleshooting, see [README-SETUP.md](./README-SETUP.md) and [README.md](./README.md).
 
-Or via command line:
-```bash
-psql "postgresql://neondb_owner:npg_TnUizRlZ6D7W@ep-green-term-awhyorsd.c-12.us-east-1.aws.neon.tech/neondb?sslmode=require" -f migrate-to-image-data.sql
-```
-
----
-
-## What Changed
-
-### ✅ Removed
-- Customer storefront (`Storefront.tsx` deleted)
-- Customer authentication endpoints
-- Customer database tables
-- Path-based routing (no `/` vs `/admin` split)
-
-### ✅ Kept
-- Admin panel with full product management
-- Admin authentication (email/password from env vars)
-- Base64 image storage in database
-- Auto-sync of admin credentials on startup
-
----
-
-## Access the Admin Panel
-
-After deployment:
-
-1. Visit: https://jbrelec.onrender.com
-2. Login with:
-   - Email: `godaranitesh75@gmail.com`
-   - Password: `Nitesh@1845#`
-3. Manage products, upload images, export reports
-
----
-
-## Testing Checklist
-
-- [ ] Visit https://jbrelec.onrender.com
-- [ ] Login page shows (not blank page)
-- [ ] Login with admin credentials works
-- [ ] Dashboard shows product stats
-- [ ] Can add new product with image
-- [ ] Can edit existing products
-- [ ] Can delete products
-- [ ] Can export CSV
-- [ ] Images display correctly
-- [ ] Session persists on page refresh
-
----
-
-## If Something Goes Wrong
-
-### Can't login
-1. Check backend logs on Render.com
-2. Verify `ADMIN_EMAIL` and `ADMIN_PASSWORD` env vars
-3. Restart the backend service (will re-sync credentials)
-
-### Images not showing
-- Check they're base64 data URLs (start with `data:image/`)
-- Check database `image_data` column has data
-- Check browser console for errors
-
-### Blank page
-- Check browser console for JavaScript errors
-- Verify build completed on Render
-- Check `dist/` folder was deployed
-
----
-
-## Admin Credentials
-
-**Email:** godaranitesh75@gmail.com  
-**Password:** Nitesh@1845#
-
-These are in `.env` and auto-sync to database on backend startup.
-
----
-
-## API Endpoints
-
-| Endpoint | Purpose | Auth |
-|----------|---------|------|
-| `GET /api/health` | Health check | None |
-| `GET /api/products` | List all products | None |
-| `POST /api/auth/login` | Admin login | None |
-| `GET /api/admin/products` | Admin product list | JWT |
-| `POST /api/admin/products` | Create product | JWT |
-| `PATCH /api/admin/products/:id` | Update product | JWT |
-| `DELETE /api/admin/products/:id` | Delete product | JWT |
-
----
-
-## Support
-
-- Backend: https://jbrelec.onrender.com
-- Database: Neon PostgreSQL (ep-green-term-awhyorsd)
-- Documentation: See README-SETUP.md
+The `render.yaml` service deploys a static demo website only; it does not deploy the store API or sync demo catalog changes to production.

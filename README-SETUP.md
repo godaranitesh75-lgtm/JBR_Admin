@@ -1,222 +1,51 @@
-# JBR Electrical Admin - Setup Guide
+# JBR Electrical admin setup
 
-## Overview
+The admin website must use the existing JBR storefront API and its PostgreSQL database. The admin frontend does not connect directly to PostgreSQL, and its optional Express backend uses a different schema and must not be used as the production store API.
 
-This is an **admin-only product management system** for JBR Electrical. There is no customer storefront - this application is solely for managing products, inventory, and generating reports.
+## Configure the admin frontend
 
----
+In the admin frontend's Vercel **build** environment, set:
 
-## Database Setup (Neon PostgreSQL)
+- `VITE_PUBLIC_API_URL`: the HTTPS base URL of the JBR store API.
+- `VITE_LOCAL_DEMO_MODE=false`.
+- `VITE_PUBLIC_CATALOG_WRITES=false`.
+- Optionally, `VITE_CLOUDINARY_CLOUD_NAME` and `VITE_CLOUDINARY_UPLOAD_PRESET`.
 
-### 1. Run the migration
+Redeploy the frontend after changing these values. The `vercel.json` API rewrite is an optional proxy and targets the same store API; the recommended configuration calls the API URL directly.
 
-Your Neon database already has the old `image_url` column. Run this migration to rename it:
+On the store API host, set `CORS_ORIGIN` (or `ALLOWED_ORIGINS`) to include the admin frontend's exact HTTPS origin. Also allow the local development origin when testing directly from localhost.
 
-```bash
-# Connect to your Neon database and run:
-psql "postgresql://neondb_owner:npg_TnUizRlZ6D7W@ep-green-term-awhyorsd.c-12.us-east-1.aws.neon.tech/neondb?sslmode=require" -f migrate-to-image-data.sql
+## Database readiness
+
+The store API health route only proves the server is responding; the product table can still be missing. The admin connection check also requests the product catalog, so it reports a missing database schema instead of showing a false connected state.
+
+Back up the production database first. In the JBR storefront repository, inspect the existing catalog tables and then, if its Prisma schema has not been applied, run from that repository's `backend` directory:
+
+```powershell
+npm run prisma:generate
+npm run prisma:push
 ```
 
-Or run it manually in the Neon SQL Editor:
+Do not run the storefront seed script in production: it deletes existing records. If products already exist in a different table/schema, migrate them to the Prisma `Product`, `Brand`, `Category`, and `Inventory` tables deliberately before switching the admin panel; blindly creating new tables could leave two catalogs.
 
-```sql
-ALTER TABLE products RENAME COLUMN image_url TO image_data;
-```
+## Sign in and edit products
 
-### 2. Backend environment variables
+Sign in using an existing store account with the `ADMIN` role. The panel calls the store API's `/api/auth/login`, `/api/auth/me`, and protected `/api/admin/products` endpoints. The API handles product/category/brand/inventory relations and returns the product image as `image_url`; the admin UI maps it to its internal image field.
 
-Your `.env` is already configured:
+Product changes require an authenticated admin session. The admin panel does not register store administrators; `/api/auth/register` is for customer registration. Ask the store owner to provision or activate an administrator account.
 
-```env
-DATABASE_URL=postgresql://neondb_owner:...@ep-green-term-awhyorsd.c-12.us-east-1.aws.neon.tech/neondb?sslmode=require
-ADMIN_EMAIL=godaranitesh75@gmail.com
-ADMIN_PASSWORD=Nitesh@1845#
-JWT_SECRET=jbr_electrical_secret_key_2024_secure_production_key
-PORT=3000
-```
+## Local development and troubleshooting
 
-**Important:** The backend **auto-syncs credentials** on startup. Even if another project wrote to `admin_credentials`, your env vars will overwrite them on each restart. This solves the shared-database conflict.
-
-### 3. Frontend environment variables
-
-`.env.production.local` is already configured:
-
-```env
-VITE_PUBLIC_API_URL=https://jbrelec.onrender.com
-```
-
----
-
-## How It Works
-
-### Image Storage
-
-Images are stored as **base64 data URLs** directly in the database:
-
-```
-data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD...
-```
-
-- Max size: ~3-4MB per image (5MB base64 limit in validation)
-- Formats: JPEG, PNG, WebP, AVIF
-- No external services needed (no Cloudinary)
-
-### Authentication
-
-- **Admin only**: Email + password from `.env` file
-  - On first login, credentials are seeded into the database
-  - On subsequent logins, database credentials are checked
-  - If env vars change, database is updated on next backend restart
-  - 15-minute session tokens
-
-### Routes
-
-| Path | Purpose | Auth |
-|------|---------|------|
-| `/` | Admin panel | Required |
-| `/admin` | Admin panel (alias) | Required |
-| `/api/products` | Public product list | None |
-| `/api/admin/*` | Admin APIs | JWT |
-| `/api/auth/login` | Admin login | None |
-
----
-
-## Development
-
-```bash
-# Install dependencies
-npm install
-
-# Start backend (port 3000)
-npm run dev:api
-
-# Start frontend dev server (port 5173)
+```powershell
+npm ci
 npm run dev
 ```
 
-Visit http://localhost:5173 to access the admin panel.
+The default is local demo mode; its product edits are stored in the browser only. To test the live API locally, set `VITE_PUBLIC_API_URL` in `.env.local` and allow the local frontend origin in the store API's CORS settings. Do not put database credentials, admin passwords, or JWT secrets in frontend variables.
 
----
+- If `/api/health` succeeds but the connection check fails on products, confirm the Prisma schema is applied to the same database used by the storefront.
+- A `401` on `/api/admin/products` means sign-in is required or the session expired.
+- A `403` means the signed-in user does not have the `ADMIN` role.
+- If an edit succeeds but the storefront does not update, verify that both websites use the same API and database, and that the product is active.
 
-## Production Build
-
-```bash
-# Build frontend
-npm run build:web
-
-# Build backend
-npm run build:server
-
-# Start production server
-npm start
-```
-
-The backend serves:
-- Static files (admin panel) from `dist/`
-- API routes at `/api/*`
-
----
-
-## Deployment
-
-### Backend (Render.com)
-
-Already deployed at `https://jbrelec.onrender.com`
-
-Environment variables:
-```
-DATABASE_URL=<your-neon-url>
-ADMIN_EMAIL=godaranitesh75@gmail.com
-ADMIN_PASSWORD=Nitesh@1845#
-JWT_SECRET=jbr_electrical_secret_key_2024_secure_production_key
-NODE_ENV=production
-PORT=3000
-```
-
-### Frontend Build
-
-Already configured in `.env.production.local`:
-```
-VITE_PUBLIC_API_URL=https://jbrelec.onrender.com
-```
-
----
-
-## Admin Panel Features
-
-✅ **Product Management**
-- Create, read, update, delete products
-- Image upload (base64, stored in database)
-- Bulk operations (delete, activate/deactivate)
-
-✅ **Inventory**
-- Stock management with inline editing
-- Low stock warnings
-- Stock value calculations
-
-✅ **Organization**
-- Category management and filtering
-- Product search
-- Sort by various fields
-
-✅ **Reports**
-- Dashboard with statistics
-- CSV export for products
-- Stock reports
-
-✅ **Security**
-- Admin authentication with email/password
-- JWT tokens (15-minute expiry)
-- Session persistence
-- Auto-sync credentials from environment variables
-
----
-
-## Notes
-
-- **Admin-only application** — no customer storefront
-- **No Cloudinary needed** — images stored as base64 in database
-- **Shared database safe** — credentials auto-sync from env vars on startup
-- **Single deployment** — one backend serves the admin panel
-
----
-
-## Troubleshooting
-
-### Can't login
-
-1. Check backend is running and `DATABASE_URL` is correct
-2. Run the migration: `ALTER TABLE products RENAME COLUMN image_url TO image_data;`
-3. Restart backend to sync credentials: `npm run dev:api`
-4. Try login with `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `.env`
-5. Check browser console for errors
-6. Check backend logs for authentication errors
-
-### Images not showing
-
-- Images must be base64 `data:image/*` URLs
-- Max ~3-4MB per image
-- Use the "Choose image" button in admin panel (auto-converts to base64)
-
-### Products list is empty
-
-- Check `/api/products` returns data: `curl https://jbrelec.onrender.com/api/products`
-- Add products through the admin panel
-- Check database connection is working
-
-### Page is blank after login
-
-- Check browser console for JavaScript errors
-- Verify the build completed successfully
-- Clear browser cache and reload
-- Check `dist/` folder exists with built files
-
----
-
-## Admin Credentials
-
-Login with:
-- **Email:** godaranitesh75@gmail.com
-- **Password:** Nitesh@1845#
-
-These are stored in `.env` and auto-synced to the database on backend startup.
+If a version of this repository containing the previous setup notes was pushed or shared, rotate the database password, administrator password, and JWT secret. Rotate any credentials that have ever been checked into a repository.

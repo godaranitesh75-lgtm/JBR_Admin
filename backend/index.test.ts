@@ -52,17 +52,17 @@ const fakePool = {
     }
     if (sql.includes("from products order by updated_at desc")) return { rows: [...products.values()], rowCount: products.size };
     if (sql.startsWith("insert into products")) {
-      const [name, sku, category, description, price, stock, image_url, active] = values;
+      const [name, sku, category, description, price, stock, image_data, active] = values;
       const now = new Date().toISOString();
-      const product = { id: randomUUID(), name, sku, category, description, price: String(price), stock, image_url, active, created_at: now, updated_at: now };
+      const product = { id: randomUUID(), name, sku, category, description, price: String(price), stock, image_data, active, created_at: now, updated_at: now };
       products.set(String(product.id), product);
       return { rows: [product], rowCount: 1 };
     }
     if (sql.startsWith("update products")) {
-      const [id, name, sku, category, description, price, stock, image_url, active] = values;
+      const [id, name, sku, category, description, price, stock, image_data, active] = values;
       const current = products.get(String(id));
       if (!current) return { rows: [], rowCount: 0 };
-      const product = { ...current, name, sku, category, description, price: String(price), stock, image_url, active, updated_at: new Date().toISOString() };
+      const product = { ...current, name, sku, category, description, price: String(price), stock, image_data, active, updated_at: new Date().toISOString() };
       products.set(String(id), product);
       return { rows: [product], rowCount: 1 };
     }
@@ -240,7 +240,7 @@ test("protects admin inventory endpoints and rejects invalid products", async ()
 
   const unconfiguredApp = createApplication({
     async query() { return { rows: [], rowCount: 0 }; },
-  } as never, secret, { allowPublicCatalogWrites: true });
+  } as never, secret, { allowPublicCatalogWrites: true, adminUsername: "", adminPassword: "" });
   const unconfiguredServer = unconfiguredApp.listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => unconfiguredServer.once("listening", resolve));
   const unconfiguredAddress = unconfiguredServer.address() as AddressInfo;
@@ -380,6 +380,8 @@ test("registers the first administrator once and allows that account to sign in"
   };
   const registrationApp = createApplication(registrationPool as never, secret, {
     adminRegistrationCode: setupCode,
+    adminUsername: "",
+    adminPassword: "",
     allowedPhones: ["+918209305040"],
   });
   const registrationServer = registrationApp.listen(0, "127.0.0.1");
@@ -449,5 +451,26 @@ test("registers the first administrator once and allows that account to sign in"
     assert.ok(registeredSession.refresh_token);
   } finally {
     await new Promise<void>((resolve, reject) => registrationServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("reports database failures instead of claiming the API is healthy", async () => {
+  const failingApp = createApplication({
+    async query(sql: string) {
+      if (sql.includes("from public.products")) throw new Error("product table unavailable");
+      return { rows: [{ "?column?": 1 }], rowCount: 1 };
+    },
+  } as never, secret, { adminUsername: "", adminPassword: "" });
+  const failingServer = failingApp.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => failingServer.once("listening", resolve));
+  const address = failingServer.address() as AddressInfo;
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/health`);
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), {
+      error: "The server could not complete this request. Please try again.",
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) => failingServer.close((error) => error ? reject(error) : resolve()));
   }
 });

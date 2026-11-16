@@ -281,40 +281,54 @@ function invalidId(req: Request, res: Response): boolean {
 }
 
 async function ensureTables(pool: Pool): Promise<void> {
-  try {
-    await pool.query(`
-      create table if not exists public.products (
-        id uuid primary key default gen_random_uuid(),
-        name text not null check (length(trim(name)) between 1 and 120),
-        sku text not null default '',
-        category text not null check (length(trim(category)) between 1 and 60),
-        description text not null default '',
-        price numeric(12, 2) not null default 0 check (price between 0 and 9999999999),
-        stock integer not null default 0 check (stock between 0 and 1000000000),
-        image_data text not null default '',
-        active boolean not null default true,
-        created_at timestamptz not null default now(),
-        updated_at timestamptz not null default now()
-      );
+  await pool.query(`
+    create table if not exists public.products (
+      id uuid primary key default gen_random_uuid(),
+      name text not null check (length(trim(name)) between 1 and 120),
+      sku text not null default '',
+      category text not null check (length(trim(category)) between 1 and 60),
+      description text not null default '',
+      price numeric(12, 2) not null default 0 check (price between 0 and 9999999999),
+      stock integer not null default 0 check (stock between 0 and 1000000000),
+      image_data text not null default '',
+      active boolean not null default true,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
 
-      create table if not exists public.admin_sessions (
-        id uuid primary key,
-        phone text not null,
-        refresh_token_hash text not null unique,
-        created_at timestamptz not null default now(),
-        revoked_at timestamptz
-      );
+    do $$
+    begin
+      if exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'products' and column_name = 'image_url'
+      ) and not exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'products' and column_name = 'image_data'
+      ) then
+        alter table public.products rename column image_url to image_data;
+      elsif not exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'products' and column_name = 'image_data'
+      ) then
+        alter table public.products add column image_data text not null default '';
+      end if;
+    end $$;
 
-      create table if not exists public.admin_credentials (
-        id integer primary key check (id = 1),
-        username text not null,
-        password_hash text not null,
-        updated_at timestamptz not null default now()
-      );
-    `);
-  } catch (error) {
-    console.error("Could not auto-create database tables:", error);
-  }
+    create table if not exists public.admin_sessions (
+      id uuid primary key,
+      phone text not null,
+      refresh_token_hash text not null unique,
+      created_at timestamptz not null default now(),
+      revoked_at timestamptz
+    );
+
+    create table if not exists public.admin_credentials (
+      id integer primary key check (id = 1),
+      username text not null,
+      password_hash text not null,
+      updated_at timestamptz not null default now()
+    );
+  `);
 }
 
 /**
@@ -327,35 +341,29 @@ async function ensureTables(pool: Pool): Promise<void> {
  */
 async function syncAdminCredentials(pool: Pool, adminUsername: string | undefined, adminPassword: string | undefined): Promise<void> {
   if (!adminUsername || !adminPassword) return;
-  try {
-    const existing = await pool.query<{ username: string; password_hash: string }>(
-      "select username, password_hash from admin_credentials where id = 1",
+  const existing = await pool.query<{ username: string; password_hash: string }>(
+    "select username, password_hash from admin_credentials where id = 1",
+  );
+  const row = existing.rows[0];
+  const normalizedUsername = adminUsername.toLowerCase();
+
+  if (!row) {
+    const passwordHash = await hashPassword(adminPassword);
+    await pool.query(
+      `insert into admin_credentials (id, username, password_hash) values (1, $1, $2) on conflict (id) do nothing`,
+      [normalizedUsername, passwordHash],
     );
-    const row = existing.rows[0];
-    const normalizedUsername = adminUsername.toLowerCase();
+    console.info("JBR Electrical: admin credentials seeded from environment variables.");
+    return;
+  }
 
-    if (!row) {
-      // No credentials in DB yet — create them from env vars
-      const passwordHash = await hashPassword(adminPassword);
-      await pool.query(
-        `insert into admin_credentials (id, username, password_hash) values (1, $1, $2) on conflict (id) do nothing`,
-        [normalizedUsername, passwordHash],
-      );
-      console.info("JBR Electrical: admin credentials seeded from environment variables.");
-      return;
-    }
-
-    // If username in DB doesn't match env var, update it (covers shared-DB conflict)
-    if (row.username.toLowerCase() !== normalizedUsername) {
-      const passwordHash = await hashPassword(adminPassword);
-      await pool.query(
-        `update admin_credentials set username = $1, password_hash = $2, updated_at = now() where id = 1`,
-        [normalizedUsername, passwordHash],
-      );
-      console.info("JBR Electrical: admin credentials updated to match environment variables.");
-    }
-  } catch (error) {
-    console.error("Could not sync admin credentials:", error);
+  if (row.username.toLowerCase() !== normalizedUsername) {
+    const passwordHash = await hashPassword(adminPassword);
+    await pool.query(
+      `update admin_credentials set username = $1, password_hash = $2, updated_at = now() where id = 1`,
+      [normalizedUsername, passwordHash],
+    );
+    console.info("JBR Electrical: admin credentials updated to match environment variables.");
   }
 }
 
@@ -422,13 +430,12 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
 
   app.get("/api/health", asyncRoute(async (_req, res) => {
     await pool.query("select 1");
-    await ensureTables(pool);
+    await pool.query("select id, name, sku, category, description, price, stock, image_data, active, created_at, updated_at from public.products limit 0");
+    await pool.query("select id from public.admin_credentials limit 0");
     res.json({ status: "ok", database: "connected" });
   }));
 
   app.get("/api/auth/config", asyncRoute(async (_req, res) => {
-    try {
-      await ensureTables(pool);
     const existing = await pool.query<{ username: string }>(
       "select username from admin_credentials where id = 1",
     );
@@ -436,16 +443,6 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
     res.json({
       email: registeredUsername ?? adminUsername ?? "",
       registration_available: !registeredUsername && Boolean(adminRegistrationCode),
-    });
-    return;
-  } catch {
-    res.json({
-      email: adminUsername ?? "",
-      registration_available: Boolean(adminRegistrationCode),
-    });
-    return;
-  }
-  void ({
     });
   }));
 

@@ -1,12 +1,24 @@
--- Migration: Rename image_url to image_data
--- This migrates the products table to store base64 image data instead of URLs
--- Run this on your Neon PostgreSQL database
+-- Upgrade an existing catalog to the image_data field used by the API.
+-- Safe to run more than once; existing image values are preserved.
+do $$
+begin
+  if to_regclass('public.products') is not null then
+    if exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'products' and column_name = 'image_url'
+    ) and not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'products' and column_name = 'image_data'
+    ) then
+      alter table public.products rename column image_url to image_data;
+    elsif not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'products' and column_name = 'image_data'
+    ) then
+      alter table public.products add column image_data text not null default '';
+    end if;
 
--- Step 1: Rename the column
-ALTER TABLE products RENAME COLUMN image_url TO image_data;
-
--- Step 2: Update the column comment for clarity
-COMMENT ON COLUMN products.image_data IS 'Base64-encoded image data (data:image/jpeg;base64,... format)';
-
--- Done! The column is now ready to store base64 image data.
--- Existing URL values will be preserved (you can manually clear them or convert them later).
+    comment on column public.products.image_data is
+      'Product image URL or data URL used by the catalog API';
+  end if;
+end $$;

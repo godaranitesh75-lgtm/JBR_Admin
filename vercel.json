@@ -2,7 +2,7 @@
     "rewrites": [
         {
             "source": "/api/(.*)",
-            "destination": "https://jbr-admin.onrender.com/api/$1"
+            "destination": "https://jbrelec.onrender.com/api/$1"
         }
     ]
 }

@@ -26,7 +26,7 @@ type AppSettings = {
 type AuthSession = {
   access_token: string;
   refresh_token?: string;
-  user: { id: string; phone?: string; role?: string };
+  user: { id: string; email?: string; phone?: string; role?: string };
 };
 type ToastMessage = { id: number; message: string; error: boolean };
 type IconName =
@@ -133,8 +133,11 @@ function plural(count: number, singular: string, multiple = `${singular}s`): str
 
 function safeSettings(): AppSettings {
   const saved = readStorage<Partial<AppSettings> & { supabaseUrl?: string; supabaseKey?: string }>(STORAGE_KEYS.settings, {});
+  const savedApiUrl = typeof saved.apiUrl === "string" ? saved.apiUrl.trim().replace(/\/+$/, "").replace(/\/api$/, "") : "";
+  const previousDirectApiUrl = savedApiUrl === "https://jbrelec.onrender.com"
+    || savedApiUrl === "https://jbr-admin.onrender.com";
   const migrated: AppSettings = {
-    apiUrl: LOCAL_DEMO_MODE ? "" : typeof saved.apiUrl === "string" && saved.apiUrl ? saved.apiUrl : BUILD_SETTINGS.apiUrl,
+    apiUrl: LOCAL_DEMO_MODE ? "" : previousDirectApiUrl && BUILD_SETTINGS.apiUrl ? BUILD_SETTINGS.apiUrl : savedApiUrl || BUILD_SETTINGS.apiUrl,
     cloudName: typeof saved.cloudName === "string" && saved.cloudName ? saved.cloudName : BUILD_SETTINGS.cloudName,
     uploadPreset: typeof saved.uploadPreset === "string" && saved.uploadPreset ? saved.uploadPreset : BUILD_SETTINGS.uploadPreset,
   };
@@ -161,10 +164,30 @@ function productFromUnknown(value: unknown): Product | null {
     description: typeof row.description === "string" ? row.description.slice(0, 1000) : "",
     price: numericPrice,
     stock: numericStock,
-    image_data: typeof row.image_data === "string" ? row.image_data : "",
+    image_data: typeof row.image_data === "string" ? row.image_data : typeof row.image_url === "string" ? row.image_url : "",
     active: row.active !== false,
     created_at: typeof row.created_at === "string" ? row.created_at : now,
     updated_at: typeof row.updated_at === "string" ? row.updated_at : now,
+  };
+}
+
+function catalogFromUnknown(value: unknown): Product[] {
+  if (!Array.isArray(value)) throw new Error("The server returned an invalid product catalog.");
+  const catalog = value.map(productFromUnknown);
+  if (catalog.some((product) => product === null)) throw new Error("The server returned invalid product data.");
+  return catalog.filter((product): product is Product => product !== null);
+}
+
+function catalogPayload(product: Product) {
+  return {
+    name: product.name,
+    sku: product.sku,
+    category: product.category,
+    description: product.description,
+    price: product.price,
+    stock: product.stock,
+    image_url: product.image_data,
+    active: product.active,
   };
 }
 
@@ -189,19 +212,6 @@ async function readResponse<T>(response: Response): Promise<T> {
     throw new Error(details || `Request failed (${response.status}).`);
   }
   return parsed as T;
-}
-
-async function renewSession(config: AppSettings, refreshToken: string): Promise<AuthSession> {
-  const response = await fetch(`${apiBase(config)}/api/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
-  const renewed = await readResponse<AuthSession>(response);
-  if (!renewed.access_token || !renewed.refresh_token || !renewed.user?.id) {
-    throw new Error("The server did not return a valid renewed session.");
-  }
-  return renewed;
 }
 
 function ProductPhoto({ product, className = "" }: { product: Pick<Product, "name" | "image_data">; className?: string }) {
@@ -247,25 +257,16 @@ function App() {
       headers.set("Authorization", `Bearer ${token}`);
       return fetch(url, { ...init, headers });
     };
-    let activeSession = auth;
-    let response = await send(activeSession.access_token);
-    if (response.status === 401 && activeSession.refresh_token) {
-      try {
-        activeSession = await renewSession(settings, activeSession.refresh_token);
-      } catch (error) {
-        localStorage.removeItem(STORAGE_KEYS.session);
-        setSession(null);
-        setRemoteAdmin(false);
-        setLoginRequired(true);
-        setLoginError(error instanceof Error ? error.message : "Your sign-in session expired. Sign in again.");
-        throw error;
-      }
-      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(activeSession));
-      setSession(activeSession);
-      response = await send(activeSession.access_token);
+    const response = await send(auth.access_token);
+    if (response.status === 401) {
+      localStorage.removeItem(STORAGE_KEYS.session);
+      setSession(null);
+      setRemoteAdmin(false);
+      setLoginRequired(true);
+      setLoginError("Your sign-in session expired. Please sign in again.");
     }
     return response;
-  }, [settings]);
+  }, []);
 
   useEffect(() => {
     const configured = !LOCAL_DEMO_MODE && Boolean(settings.apiUrl);
@@ -282,10 +283,9 @@ function App() {
       setSession(null);
       setLoginRequired(false);
       void fetch(`${apiBase(settings)}/api/admin/products`)
-        .then(readResponse<Product[]>)
-        .then((catalog) => {
-          if (!Array.isArray(catalog)) throw new Error("The server returned an invalid product catalog.");
-          setProducts(catalog);
+        .then(readResponse<unknown>)
+        .then((value) => {
+          setProducts(catalogFromUnknown(value));
           setRemoteAdmin(true);
         })
         .catch((error: unknown) => {
@@ -297,18 +297,7 @@ function App() {
     const savedSession = readSession();
     if (!savedSession?.access_token || !savedSession.user?.id) {
       setLoginRequired(true);
-      void fetch(`${apiBase(settings)}/api/auth/config`)
-        .then(readResponse<{ email: string; registration_available: boolean }>)
-        .then((config) => {
-          if (typeof config.email !== "string") {
-            throw new Error("The server returned an invalid sign-in configuration.");
-          }
-          if (config.email) setLoginEmail((current) => current || config.email);
-          setRegistrationAvailable(config.registration_available === true);
-        })
-        .catch((error: unknown) => {
-          setLoginError(error instanceof Error ? `Could not load the configured admin email: ${error.message}` : "Could not load the configured admin email.");
-        });
+      setRegistrationAvailable(false);
       return;
     }
     setSession(savedSession);
@@ -320,22 +309,19 @@ function App() {
 
   const verifyAdministrator = useCallback(async (config: AppSettings, savedAuth: AuthSession) => {
     try {
-      if (!savedAuth.refresh_token) throw new Error("This saved sign-in needs to be renewed. Please sign in again.");
-      const auth = await renewSession(config, savedAuth.refresh_token);
-      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(auth));
       const identity = await readResponse<{ user: AuthSession["user"] }>(await fetch(`${apiBase(config)}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${auth.access_token}` },
+        headers: { Authorization: `Bearer ${savedAuth.access_token}` },
       }));
       if (identity.user.role !== "ADMIN") throw new Error("This account does not have JBR Electrical administrator access.");
       const catalogResponse = await fetch(`${apiBase(config)}/api/admin/products`, {
-        headers: { Authorization: `Bearer ${auth.access_token}` },
+        headers: { Authorization: `Bearer ${savedAuth.access_token}` },
       });
-      const catalog = await readResponse<Product[]>(catalogResponse);
-      setSession(auth);
+      const catalog = catalogFromUnknown(await readResponse<unknown>(catalogResponse));
+      setSession(savedAuth);
       setRemoteAdmin(true);
       setLoginRequired(false);
       setProducts(catalog);
-      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(auth));
+      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(savedAuth));
     } catch (error) {
       localStorage.removeItem(STORAGE_KEYS.session);
       setSession(null);
@@ -393,24 +379,15 @@ function App() {
     if (!remoteAdmin) throw new Error("The live catalog is not connected. Wait for it to load before editing products.");
     if (PUBLIC_CATALOG_WRITES) {
       const exists = products.some((item) => item.id === product.id);
-      const payload = {
-        name: product.name,
-        sku: product.sku,
-        category: product.category,
-        description: product.description,
-        price: product.price,
-        stock: product.stock,
-        image_data: product.image_data,
-        active: product.active,
-      };
+      const payload = catalogPayload(product);
       const url = `${apiBase(settings)}/api/admin/products${exists ? `/${encodeURIComponent(product.id)}` : ""}`;
       const response = await fetch(url, {
         method: exists ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const saved = await readResponse<Product>(response);
-      if (!saved?.id) throw new Error("The server did not return the saved product.");
+      const saved = productFromUnknown(await readResponse<unknown>(response));
+      if (!saved?.id) throw new Error("The server did not return a valid saved product.");
       setProducts((current) => {
         const alreadyExists = current.some((item) => item.id === saved.id);
         return alreadyExists ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current];
@@ -419,16 +396,7 @@ function App() {
     }
     if (!session) throw new Error("Sign in with an approved store administrator account to edit products.");
     const { id } = product;
-    const payload = {
-      name: product.name,
-      sku: product.sku,
-      category: product.category,
-      description: product.description,
-      price: product.price,
-      stock: product.stock,
-      image_data: product.image_data,
-      active: product.active,
-    };
+    const payload = catalogPayload(product);
     const isExisting = products.some((item) => item.id === product.id);
     const response = await authenticatedFetch(session, `${apiBase(settings)}/api/admin/products${isExisting ? `/${encodeURIComponent(id)}` : ""}`, {
       method: isExisting ? "PATCH" : "POST",
@@ -438,8 +406,8 @@ function App() {
       },
       body: JSON.stringify(payload),
     });
-    const saved = await readResponse<Product>(response);
-    if (!saved?.id) throw new Error("The server did not return the saved product.");
+    const saved = productFromUnknown(await readResponse<unknown>(response));
+    if (!saved?.id) throw new Error("The server did not return a valid saved product.");
     setProducts((current) => {
       const exists = current.some((item) => item.id === saved.id);
       return exists ? current.map((item) => item.id === saved.id ? saved : item) : [saved, ...current];
@@ -499,10 +467,18 @@ function App() {
       let publicCatalog: Product[] | undefined;
       if (url) {
         const response = await fetch(`${url}/api/health`);
-        await readResponse<{ status: string }>(response);
+        const health = await readResponse<{ status?: string }>(response);
+        if (health.status !== "ok") throw new Error("The store API health check did not succeed.");
+        const storeCatalog = await readResponse<{ products?: unknown }>(
+          await fetch(`${url}/api/products?limit=1`),
+        );
+        if (!Array.isArray(storeCatalog.products)) {
+          throw new Error("The store API did not return its product catalog. Check the store database schema.");
+        }
         if (PUBLIC_CATALOG_WRITES) {
-          publicCatalog = await readResponse<Product[]>(await fetch(`${apiBase(next)}/api/admin/products`));
-          if (!Array.isArray(publicCatalog)) throw new Error("The server returned an invalid product catalog.");
+          publicCatalog = catalogFromUnknown(
+            await readResponse<unknown>(await fetch(`${apiBase(next)}/api/admin/products`)),
+          );
         }
       }
       localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(next));
@@ -513,6 +489,7 @@ function App() {
       setRemoteAdmin(false);
       if (url) {
         setMode("remote");
+        setRegistrationAvailable(false);
         if (PUBLIC_CATALOG_WRITES) {
           setProducts(publicCatalog ?? []);
           setRemoteAdmin(true);
@@ -522,10 +499,11 @@ function App() {
         } else {
           setLoginRequired(true);
           setLoginError("");
-          notify("JBR store API connected. Sign in with your administrator username and password.");
+          notify("JBR store API and catalog are available. Sign in with an existing store administrator account.");
         }
       } else {
         setMode("demo");
+        setRegistrationAvailable(true);
         setLoginRequired(false);
         setRemoteAdmin(false);
         notify("Database disconnected. Your demo catalog is ready.");
@@ -553,11 +531,11 @@ function App() {
   };
 
   const changeAdminPassword = async (currentPassword: string, newPassword: string) => {
-    if (!session) throw new Error("Sign in to change the administrator password.");
-    const response = await authenticatedFetch(session, `${apiBase(settings)}/api/auth/password`, {
+    if (!session?.user.email) throw new Error("The signed-in administrator email is unavailable.");
+    const response = await fetch(`${apiBase(settings)}/api/auth/reset-password`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      body: JSON.stringify({ email: session.user.email, currentPassword, newPassword }),
     });
     if (!response.ok) await readResponse<unknown>(response);
     localStorage.removeItem(STORAGE_KEYS.session);
@@ -585,12 +563,12 @@ function App() {
   };
 
   const completeSignIn = async (loginResult: AuthSession) => {
-    if (!loginResult.access_token || !loginResult.refresh_token || !loginResult.user?.id) throw new Error("The server did not return a valid sign-in session.");
+    if (!loginResult.access_token || !loginResult.user?.id) throw new Error("The server did not return a valid sign-in session.");
     if (loginResult.user.role !== "ADMIN") throw new Error("This account does not have JBR Electrical administrator access.");
     const catalogResponse = await fetch(`${apiBase(settings)}/api/admin/products`, {
       headers: { Authorization: `Bearer ${loginResult.access_token}` },
     });
-    const remoteProducts = await readResponse<Product[]>(catalogResponse);
+    const remoteProducts = catalogFromUnknown(await readResponse<unknown>(catalogResponse));
     localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(loginResult));
     setProducts(remoteProducts);
     setSession(loginResult);
@@ -625,7 +603,8 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: loginEmail, password: loginPassword }),
       });
-      await completeSignIn(await readResponse<AuthSession>(response));
+      const loginResult = await readResponse<{ token: string; user: AuthSession["user"] }>(response);
+      await completeSignIn({ access_token: loginResult.token, user: loginResult.user });
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "Could not sign in. Check your connection and try again.");
     } finally {
@@ -633,12 +612,14 @@ function App() {
     }
   };
 
-  const registerAdmin = async (event: FormEvent<HTMLFormElement>, registrationCode: string) => {
+  const registerAdmin = async (event: FormEvent<HTMLFormElement>, _registrationCode: string) => {
     event.preventDefault();
     setLoginError("");
     setLoading(true);
     try {
-      if (!remoteConfigured) {
+      if (remoteConfigured) {
+        throw new Error("Administrator accounts are managed by the JBR store. Ask the store owner to create an admin account.");
+      } else {
         const users = readStorage<Array<{ email: string; passwordHash: string; name: string }>>(STORAGE_KEYS.demoUsers, []);
         const normalizedEmail = loginEmail.trim().toLowerCase();
         if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(normalizedEmail)) throw new Error("Enter a valid email address.");
@@ -654,16 +635,6 @@ function App() {
         notify("Account created! You’re now inside the JBR demo workspace.");
         return;
       }
-      const response = await fetch(`${apiBase(settings)}/api/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: loginEmail,
-          password: loginPassword,
-          registration_code: registrationCode,
-        }),
-      });
-      await completeSignIn(await readResponse<AuthSession>(response));
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "Could not create the administrator account. Check your connection and try again.");
     } finally {
@@ -1094,6 +1065,10 @@ function SettingsView({ settings, setSettings, databaseConnected, localDemoOnly,
       setPasswordError("Use at least 12 characters for your new password.");
       return;
     }
+    if (!/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/\d/.test(newPassword)) {
+      setPasswordError("Include at least one uppercase letter, one lowercase letter, and one number.");
+      return;
+    }
     if (newPassword !== confirmPassword) {
       setPasswordError("The new password and confirmation do not match.");
       return;
@@ -1117,13 +1092,13 @@ function SettingsView({ settings, setSettings, databaseConnected, localDemoOnly,
       ? <div className="site-integration-warning" role="note"><Icon name="info" /><div><strong>This build is using a local demo catalog.</strong><p>Changes stay on this device and are not sent to the live website. Rebuild without VITE_LOCAL_DEMO_MODE to enable the protected live API.</p></div></div>
       : publicCatalogWrites
         ? <div className="site-integration-warning" role="alert"><Icon name="alert" /><div><strong>Public live catalog access is enabled without authentication.</strong><p>Anyone who can reach this API can view the full catalog and add, edit, or delete products. Rate limiting is only a basic throttle, not access control.</p></div></div>
-        : <div className="site-integration-warning" role="note"><Icon name="info" /><div><strong>The APK is preconfigured to use the live JBR store API.</strong><p>Deploy the backend changes from the JBR website source before using the APK. They enable the Vercel and Android origins and add the admin catalog endpoints the APK needs. The database connection stays on the backend.</p></div></div>}
+        : <div className="site-integration-warning" role="note"><Icon name="info" /><div><strong>Changes use the protected JBR store API.</strong><p>Sign in with an existing JBR administrator account. Product updates are saved to the same API and database used by the customer storefront.</p></div></div>}
     <div className="settings-layout">
       <section className="panel settings-card">
         <div className="settings-card-heading"><span className="settings-large-icon database-icon"><Icon name="database" /></span><div><h2>{localDemoOnly ? "Local demo catalog" : "Live shop database"}</h2><p>{localDemoOnly ? "Catalog changes are saved on this device only." : "Manage the same PostgreSQL catalog the JBR website uses."}</p></div><span className={`integration-state ${databaseConnected ? "is-connected" : ""}`}>{localDemoOnly ? "Local only" : databaseConnected ? "Connected" : settings.apiUrl ? publicCatalogWrites ? "Needs API opt-in" : "Needs sign-in" : "Not connected"}</span></div>
         {!localDemoOnly && <form className="settings-form" onSubmit={saveDatabase}>
-          <label className="field-label" htmlFor="api-url">JBR store API URL</label><input className="text-input" id="api-url" type="url" placeholder="https://your-api.example" autoComplete="url" value={settings.apiUrl} onChange={(event) => update("apiUrl", event.target.value)} />
-          <p className="field-help">This must be the same API that serves the JBR website. Database credentials stay on the server; never enter or bundle them in this app. HTTPS is required outside localhost.</p>
+          <label className="field-label" htmlFor="api-url">JBR store API or proxy URL</label><input className="text-input" id="api-url" type="url" placeholder="https://jbrelec.onrender.com" autoComplete="url" value={settings.apiUrl} onChange={(event) => update("apiUrl", event.target.value)} />
+          <p className="field-help">Use the configured Vercel proxy URL or the store API URL allowed by CORS. Database credentials stay on the server; never enter or bundle them in this app. HTTPS is required outside localhost.</p>
           <div className="settings-actions"><button className="button button-primary" type="submit"><Icon name="link" /> Save &amp; connect</button><button className="button button-secondary" type="button" onClick={disconnectDatabase}>Disconnect</button></div>
         </form>}
         <div className="setup-inline"><span className="setup-step">1</span><span>{localDemoOnly ? "Use Export backup below to save or move a copy of this device's demo catalog." : "The existing website API uses its configured database. Do not create a second catalog or paste its database URL into the APK."}</span></div>
@@ -1134,7 +1109,7 @@ function SettingsView({ settings, setSettings, databaseConnected, localDemoOnly,
           <label className="field-label" htmlFor="current-admin-password">Current password</label><input className="text-input" id="current-admin-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
           <label className="field-label" htmlFor="new-admin-password">New password</label><input className="text-input" id="new-admin-password" type="password" autoComplete="new-password" minLength={12} maxLength={256} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
           <label className="field-label" htmlFor="confirm-admin-password">Confirm new password</label><input className="text-input" id="confirm-admin-password" type="password" autoComplete="new-password" minLength={12} maxLength={256} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required />
-          <p className="field-help">Use at least 12 characters. Changing the password revokes all refresh sessions; existing short-lived access tokens expire within 15 minutes. You will need to sign in again here.</p>
+          <p className="field-help">Use at least 12 characters, including uppercase, lowercase, and a number. You will need to sign in again after changing the password.</p>
           {passwordError && <div className="form-error" role="alert">{passwordError}</div>}
           <div className="settings-actions"><button className="button button-primary" type="submit" disabled={changingPassword}><Icon name="lock" />{changingPassword ? "Changing…" : "Change password"}</button></div>
         </form>
@@ -1154,7 +1129,7 @@ function SettingsView({ settings, setSettings, databaseConnected, localDemoOnly,
           ? <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Manage this device's catalog</strong><p>Products are stored locally on this device and remain separate from the live website catalog.</p></div></div><div className="guide-step"><span>02</span><div><strong>Export a backup</strong><p>Use Catalog backup to export JSON before clearing app data or changing devices.</p></div></div><div className="guide-step"><span>03</span><div><strong>Restore live service later</strong><p>Rebuild without VITE_LOCAL_DEMO_MODE after the protected production API is ready.</p></div></div></div>
           : publicCatalogWrites
             ? <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the API opt-in</strong><p>Set ENABLE_PUBLIC_CATALOG_WRITES=true on the API host and deploy. Keep the API rate limit enabled.</p></div></div><div className="guide-step"><span>02</span><div><strong>Connect to the shared database</strong><p>Use the API that serves the website, with its existing database configuration. The APK never connects directly to PostgreSQL.</p></div></div><div className="guide-step"><span>03</span><div><strong>Accept the public access risk</strong><p>No login is required: anyone who can reach the API may update or delete products in the live catalog.</p></div></div></div>
-            : <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Deploy the protected backend</strong><p>Deploy the API to the same database used by the website and configure ADMIN_EMAIL and ADMIN_PASSWORD in the host's private environment settings.</p></div></div><div className="guide-step"><span>02</span><div><strong>Sign in with your admin credentials</strong><p>The API supplies the configured email to prefill sign-in, checks your password, and issues a short-lived session. The password is not saved on the device or included in the APK.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here, or bake them into a shared APK build to enable new image uploads.</p></div></div></div>}
+            : <div className="guide-steps"><div className="guide-step"><span>01</span><div><strong>Connect the store API</strong><p>Use the Vercel proxy or the API host configured for the customer website. The API must have its Prisma schema applied to the production database.</p></div></div><div className="guide-step"><span>02</span><div><strong>Sign in as a store administrator</strong><p>Use an existing JBR user account with the ADMIN role. The API checks the role before allowing catalog changes.</p></div></div><div className="guide-step"><span>03</span><div><strong>Configure Cloudinary once</strong><p>Save the cloud name and unsigned upload preset here to enable new image uploads.</p></div></div></div>}
         <div className="guide-footer"><Icon name="lock" /> Database credentials and signing secrets stay on the backend, never in the APK.</div>
       </section>
       <section className="panel data-tools-card"><div><h2>Catalog backup</h2><p>Export or restore your product data as a JSON file.</p></div><div className="data-tools-actions"><button className="button button-secondary" onClick={exportJson}><Icon name="download" /> Export backup</button><label className="button button-secondary import-button"><Icon name="upload" /> Import backup<input type="file" accept="application/json,.json" hidden onChange={importCatalog} /></label></div></section>
