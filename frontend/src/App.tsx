@@ -603,8 +603,8 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: loginEmail, password: loginPassword }),
       });
-      const loginResult = await readResponse<{ token: string; user: AuthSession["user"] }>(response);
-      await completeSignIn({ access_token: loginResult.token, user: loginResult.user });
+      const loginResult = await readResponse<AuthSession>(response);
+      await completeSignIn(loginResult);
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "Could not sign in. Check your connection and try again.");
     } finally {
