@@ -28,6 +28,12 @@ type AuthSession = {
   refresh_token?: string;
   user: { id: string; email?: string; phone?: string; role?: string };
 };
+type AuthLoginResponse = {
+  access_token?: string;
+  token?: string;
+  refresh_token?: string;
+  user: AuthSession["user"];
+};
 type ToastMessage = { id: number; message: string; error: boolean };
 type IconName =
   | "alert" | "book" | "bolt" | "box" | "check" | "chevron" | "close"
@@ -603,8 +609,14 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: loginEmail, password: loginPassword }),
       });
-      const loginResult = await readResponse<AuthSession>(response);
-      await completeSignIn(loginResult);
+      const loginResult = await readResponse<AuthLoginResponse>(response);
+      const accessToken = loginResult.access_token ?? loginResult.token;
+      if (!accessToken) throw new Error("The server did not return a valid sign-in session.");
+      await completeSignIn({
+        access_token: accessToken,
+        refresh_token: loginResult.refresh_token,
+        user: loginResult.user,
+      });
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "Could not sign in. Check your connection and try again.");
     } finally {
