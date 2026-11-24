@@ -6,11 +6,12 @@ import type { ErrorRequestHandler, NextFunction, Request, Response } from "expre
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import jwt from "jsonwebtoken";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import type { QueryResultRow } from "pg";
 import { z } from "zod";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import pool from "./src/config/db.js";
 
 type AdminIdentity = { id: string; phone: string; role: "ADMIN" };
 type TwilioVerifyConfig = { accountSid: string; authToken: string; serviceSid: string };
@@ -280,55 +281,28 @@ function invalidId(req: Request, res: Response): boolean {
   return true;
 }
 
-async function ensureTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    create table if not exists public.products (
-      id uuid primary key default gen_random_uuid(),
-      name text not null check (length(trim(name)) between 1 and 120),
-      sku text not null default '',
-      category text not null check (length(trim(category)) between 1 and 60),
-      description text not null default '',
-      price numeric(12, 2) not null default 0 check (price between 0 and 9999999999),
-      stock integer not null default 0 check (stock between 0 and 1000000000),
-      image_data text not null default '',
-      active boolean not null default true,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
+const requiredColumns = {
+  products: ["id", "name", "sku", "category", "description", "price", "stock", "image_data", "active", "created_at", "updated_at"],
+  admin_credentials: ["id", "username", "password_hash", "updated_at"],
+  admin_sessions: ["id", "phone", "refresh_token_hash", "created_at", "revoked_at"],
+} as const;
 
-    do $$
-    begin
-      if exists (
-        select 1 from information_schema.columns
-        where table_schema = 'public' and table_name = 'products' and column_name = 'image_url'
-      ) and not exists (
-        select 1 from information_schema.columns
-        where table_schema = 'public' and table_name = 'products' and column_name = 'image_data'
-      ) then
-        alter table public.products rename column image_url to image_data;
-      elsif not exists (
-        select 1 from information_schema.columns
-        where table_schema = 'public' and table_name = 'products' and column_name = 'image_data'
-      ) then
-        alter table public.products add column image_data text not null default '';
-      end if;
-    end $$;
-
-    create table if not exists public.admin_sessions (
-      id uuid primary key,
-      phone text not null,
-      refresh_token_hash text not null unique,
-      created_at timestamptz not null default now(),
-      revoked_at timestamptz
-    );
-
-    create table if not exists public.admin_credentials (
-      id integer primary key check (id = 1),
-      username text not null,
-      password_hash text not null,
-      updated_at timestamptz not null default now()
-    );
-  `);
+export async function assertExistingSchema(pool: Pool): Promise<void> {
+  const tableNames = Object.keys(requiredColumns);
+  const result = await pool.query<{ table_name: string; column_name: string }>(
+    `select table_name, column_name
+     from information_schema.columns
+     where table_schema = 'public' and table_name = any($1::text[])`,
+    [tableNames],
+  );
+  const existingColumns = new Set(result.rows.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
+  const missingColumns = Object.entries(requiredColumns).flatMap(([tableName, columns]) =>
+    columns.filter((columnName) => !existingColumns.has(`${tableName}.${columnName}`))
+      .map((columnName) => `${tableName}.${columnName}`),
+  );
+  if (missingColumns.length) {
+    throw new Error(`The database is missing required columns: ${missingColumns.join(", ")}`);
+  }
 }
 
 /**
@@ -849,18 +823,10 @@ export function createApplication(pool: Pool, secret: string, options: AuthOptio
 
 async function start(): Promise<void> {
   assertConfiguration();
-  const pool = new Pool({
-    connectionString: databaseUrl,
-    ssl: { rejectUnauthorized: true },
-    max: 10,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
-  });
-  pool.on("error", (error) => console.error("An idle Neon connection failed:", error.message));
 
   try {
     await pool.query("select 1");
-    await ensureTables(pool);
+    await assertExistingSchema(pool);
     await syncAdminCredentials(pool, configuredAdminUsername, configuredAdminPassword);
     const app = createApplication(pool, jwtSecret!);
     const port = Number(process.env.PORT ?? 3000);

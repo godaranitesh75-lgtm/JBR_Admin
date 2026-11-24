@@ -2,6 +2,8 @@
 
 The admin website must use the existing JBR storefront API and its PostgreSQL database. The admin frontend does not connect directly to PostgreSQL, and its optional Express backend uses a different schema and must not be used as the production store API.
 
+The optional Express API in this repository uses the existing `public.products`, `public.admin_credentials`, and `public.admin_sessions` tables. It validates their required columns at startup and does not create or migrate tables. Product categories are stored in `products.category`; this is not the storefront Prisma `Product`/`Brand`/`Category`/`Inventory` schema. Use this API for the customer website only if that website reads from the same `public.products` table.
+
 ## Configure the admin frontend
 
 In the admin frontend's Vercel **build** environment, set:
@@ -30,7 +32,7 @@ Do not run the storefront seed script in production: it deletes existing records
 
 ## Sign in and edit products
 
-Sign in using an existing store account with the `ADMIN` role. The panel calls the store API's `/api/auth/login`, `/api/auth/me`, and protected `/api/admin/products` endpoints. The API handles product/category/brand/inventory relations and returns the product image as `image_url`; the admin UI maps it to its internal image field.
+Sign in using an existing store account with the `ADMIN` role. The panel calls the store API's `/api/auth/login`, `/api/auth/me`, `/api/auth/password`, `/api/auth/logout`, and protected `/api/admin/products` endpoints. The API handles product/category/brand/inventory relations and returns the product image as `image_url`; the admin UI maps it to its internal image field.
 
 Product changes require an authenticated admin session. The admin panel does not register store administrators; `/api/auth/register` is for customer registration. Ask the store owner to provision or activate an administrator account.
 

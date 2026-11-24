@@ -537,11 +537,11 @@ function App() {
   };
 
   const changeAdminPassword = async (currentPassword: string, newPassword: string) => {
-    if (!session?.user.email) throw new Error("The signed-in administrator email is unavailable.");
-    const response = await fetch(`${apiBase(settings)}/api/auth/reset-password`, {
+    if (!session?.access_token) throw new Error("Sign in again before changing your password.");
+    const response = await authenticatedFetch(session, `${apiBase(settings)}/api/auth/password`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: session.user.email, currentPassword, newPassword }),
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     });
     if (!response.ok) await readResponse<unknown>(response);
     localStorage.removeItem(STORAGE_KEYS.session);

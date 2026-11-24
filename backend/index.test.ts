@@ -2,7 +2,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
-import { createApplication } from "./index.js";
+import { assertExistingSchema, createApplication } from "./index.js";
 
 const secret = "test-secret-value-that-is-at-least-thirty-two-characters-long";
 const products = new Map<string, Record<string, unknown>>();
@@ -94,6 +94,22 @@ after(async () => {
   await Promise.all([server, publicServer].map((activeServer) => new Promise<void>((resolve, reject) => {
     activeServer.close((error) => error ? reject(error) : resolve());
   })));
+});
+
+test("requires existing admin tables without changing the database schema", async () => {
+  const statements: string[] = [];
+  await assert.rejects(
+    assertExistingSchema({
+      async query(sql: string) {
+        statements.push(sql);
+        return { rows: [] };
+      },
+    } as never),
+    /The database is missing required columns: products\.id/,
+  );
+  assert.equal(statements.length, 1);
+  assert.match(statements[0], /information_schema\.columns/i);
+  assert.doesNotMatch(statements[0], /\b(create|alter|drop)\b/i);
 });
 
 async function authenticate(): Promise<{ access_token: string; refresh_token: string }> {
